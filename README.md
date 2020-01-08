@@ -14,4 +14,4 @@ It's essentially just a fancy wrapper around `iproute2` and `qemu` for KVM.<br>
 
  * Routers *(bridge with a outbound interface slaved as trunk, and LAN port is a VETH interface)*
  * Switches *(normal bridge utility interface)*
- * Virtual Hard drives with snapshots *(Currently only qcow2 format)
+ * Virtual Hard drives with snapshots *(Currently only qcow2 format)*
