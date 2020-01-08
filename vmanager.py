@@ -1,10 +1,14 @@
-from socket import AF_INET
+from socket import AF_INET, socket
 from pyroute2 import IPRoute, IPDB, netlink
 from collections import OrderedDict as OD
 from random import randint # TODO: Replace
-from threading import Thread
+from threading import Thread, enumerate as tenum
 from subprocess import Popen, STDOUT, PIPE
 from glob import glob
+from select import epoll, EPOLLIN, EPOLLHUP
+import pty
+import shlex
+import time
 import ipaddress
 import shutil
 import os
@@ -104,14 +108,71 @@ def sys_command(cmd, opts=None, *args, **kwargs):
 	handle.stdout.close()
 	return output
 
-class _spawn(Thread):
-	def __init__(self, cmd, callback=None, start_callback=None, *args, **kwargs):
+class simplified_client_socket():
+	def __init__(self, target, port, *args, **kwargs):
+		self.data = b''
+		self.data_pos = 0
+		self._poll = epoll()
+		self.target = target
+		self.port = port
+		try:
+			self.socket = socket()
+			self.socket.connect((self.target, self.port))
+			self._poll.register(self.socket.fileno(), EPOLLIN | EPOLLHUP)
+		except:
+			self.socket = None
+
+	def poll(self, timeout=0.001, fileno=None):
+		d = dict(self._poll.poll(timeout))
+		if fileno: return d[fileno] if fileno in d else None
+		return d
+
+	def recv(self, buffert=8192):
+		if not self.socket:
+			try:
+				self.socket = socket()
+				self.socket.connect((self.target, self.port))
+				self._poll.register(self.socket.fileno(), EPOLLIN | EPOLLHUP)
+			except:
+				self.socket = None
+				return None
+
+		if self.poll(fileno=self.socket.fileno()):
+			try:
+				d = self.socket.recv(buffert)
+			except ConnectionResetError:
+				d = ''
+			if len(d) == 0:
+				self.close()
+				return None
+			self.data += d
+			self.data_pos += len(d)
+			return self.data[self.data_pos-len(d):]
+		return None
+
+	def close(self):
+		self.socket.close()
+		return True
+
+	def send(self, data):
+		if not self.socket:
+			try:
+				self.socket = socket()
+				self.socket.connect((self.target, self.port))
+				self._poll.register(self.socket.fileno(), EPOLLIN | EPOLLHUP)
+			except:
+				self.socket = None
+				return None
+
+		if type(data) != bytes: data = bytes(data, 'UTF-8')
+		self.socket.send(data)
+
+class threaded(Thread):
+	def __init__(self, callback=None, start_callback=None, *args, **kwargs):
 		if not 'worker_id' in kwargs: kwargs['worker_id'] = randint(1000, 9999)
 		Thread.__init__(self)
-		self.cmd = shlex.split(cmd)
 		self.args = args
 		self.kwargs = kwargs
-		self.callback = callback
 		self.pid = None
 		self.exit_code = None
 		self.started = time.time()
@@ -120,18 +181,15 @@ class _spawn(Thread):
 		self.trace_log = b''
 		self.status = 'starting'
 
+		self.callback = callback
+		self.start_callback = start_callback
+
 		user_catalogue = '/home/anton'
 		self.cwd = f"{user_catalogue}/.cache/vmmanger/workers/{kwargs['worker_id']}/"
-		self.exec_dir = f'{self.cwd}/{basename(self.cmd[0])}_workingdir'
+		self.cmd = None
 
-		if not self.cmd[0][0] == '/':
-			o = b''.join(sys_command('/usr/bin/which {}'.format(self.cmd[0])).exec())
-			self.cmd[0] = o.decode('UTF-8')
-
-		if not isdir(self.exec_dir):
-			os.makedirs(self.exec_dir)
-
-		if start_callback: start_callback(self, *args, **kwargs)
+	def start_thread(self, cmd, *args, **kwargs):
+		self.raw_cmd = cmd
 		self.start()
 
 	def __repr__(self, *args, **kwargs):
@@ -149,7 +207,7 @@ class _spawn(Thread):
 			'exit_code' : self.exit_code
 		}
 
-	def run(self):
+	def run(self, *args, **kwargs):
 		main = None
 		for t in tenum():
 			if t.name == 'MainThread':
@@ -159,6 +217,18 @@ class _spawn(Thread):
 		if not main:
 			print('Main thread not existing')
 			return
+
+		self.cmd = shlex.split(self.raw_cmd)
+		self.exec_dir = f'{self.cwd}/{os.path.basename(self.cmd[0])}_workingdir'
+
+		if not self.cmd[0][0] == '/':
+			o = sys_command('/usr/bin/which {}'.format(self.cmd[0])).strip()
+			self.cmd[0] = o.decode('UTF-8')
+
+		if not os.path.isdir(self.exec_dir):
+			os.makedirs(self.exec_dir)
+
+		if self.start_callback: self.start_callback(self, *args, **kwargs)
 		
 		self.status = 'running'
 		old_dir = os.getcwd()
@@ -172,15 +242,15 @@ class _spawn(Thread):
 		poller = epoll()
 		poller.register(child_fd, EPOLLIN | EPOLLHUP)
 
-		alive = True
+		self.alive = True
 		last_trigger_pos = 0
-		while alive and main and main.isAlive():
+		while self.alive and main and main.is_alive():
 			for fileno, event in poller.poll(0.1):
 				try:
 					output = os.read(child_fd, 8192).strip()
 					self.trace_log += output
 				except OSError:
-					alive = False
+					self.alive = False
 					break
 
 				lower = output.lower()
@@ -203,10 +273,11 @@ class _spawn(Thread):
 					if len(self.kwargs['events']) == 0:
 
 						if bytes(f']$'.lower(), 'UTF-8') in self.trace_log[0-len(f']$')-5:].lower():
-							alive = False
+							self.alive = False
 							break
 
 		self.status = 'done'
+		self.alive = False
 
 		try:
 			self.exit_code = os.waitpid(self.pid, 0)[1]
@@ -220,19 +291,12 @@ class _spawn(Thread):
 		with open(f'{self.cwd}/trace.log', 'wb') as fh:
 			fh.write(self.trace_log)
 
-		worker_history[self.worker_id] = self.dump()
-
-		if 'dependency' in self.kwargs:
-			## If this had a dependency waiting,
-			## Start it since there's no hook for this yet, the worker has to spawn it's waiting workers.
-			module = self.kwargs['dependency']['module']
-			print(self.cmd[0],'fullfills a dependency:', module)
-			dependency_id = self.kwargs['dependency']['id']
-			dependencies[module][dependency_id]['fullfilled'] = True
-			dependencies[module][dependency_id]['spawn'](*dependencies[module][dependency_id]['args'], **dependencies[module][dependency_id]['kwargs'], start_callback=_worker_started_notification)
-
 		if self.callback:
 			self.callback(self, *self.args, **self.kwargs)
+
+		if self.exit_code != 0:
+			print(f'Process {self.cmd[0]} has exited with {self.exit_code}.')
+			print(self.trace_log)
 
 		return self.exit_code
 
@@ -314,11 +378,6 @@ class Bond():
 		ip link set eth1 master bond1
 		"""
 
-class Machine():
-	""" A place holder for a KVM state"""
-	def __init__(self, *args, **kwargs):
-		pass
-
 class Switch():
 	""" Creates a bridge with no firewall rules, allowing all traffic to flow"""
 	def __init__(self, ifname=None, *args, **kwargs):
@@ -327,8 +386,11 @@ class Switch():
 		if not ifname: ifname = 'switch0'
 
 		with IPRoute() as ip:
-			ip.link('add', ifname=ifname, kind='bridge')
-			self.index = ip.link_lookup(ifname=ifname)[0]
+			switch_lookup = ip.link_lookup(ifname=ifname)
+			if not switch_lookup:
+				ip.link('add', ifname=ifname, kind='bridge')
+				switch_lookup = ip.link_lookup(ifname=ifname)
+			self.index = switch_lookup[0]
 
 			for interface in args:
 				interface_index = ip.link_lookup(ifname=interface)[0]
@@ -338,6 +400,13 @@ class Switch():
 	def connect(self, what, *args, **kwargs):
 		if what != int: what = ip.link_lookup(ifname=what)[0]
 		ip.link("set", index=what, master=self.index)
+
+	def delete(self, *args, **kwargs):
+		#for port in self.ports:
+		#	port.delete()
+
+		with IPRoute() as ip:
+			ip.link("del", index=self.index)
 
 class Router():
 	""" Creates a bridge <-> interface link with a in and out side"""
@@ -352,12 +421,24 @@ class Router():
 			else:
 				raise KeyError('Router() needs a trunk interface.')
 		if not 'ifname' in kwargs: kwargs['ifname'] = 'router0'
-		if not 'input' in kwargs: kwargs['input'] = NetworkPipe(f'{kwargs["ifname"]}-p0', f'{kwargs["ifname"]}-sink0')
+		if not 'input' in kwargs: kwargs['input'] = None
 
 		with IPRoute() as ip:
-			ip.link('add', ifname=kwargs['ifname'], kind='bridge')
-			self.index = ip.link_lookup(ifname=kwargs['ifname'])[0]
-			self.trunk_index = ip.link_lookup(ifname=kwargs['trunk'])[0]
+			trunk = ip.link_lookup(ifname=kwargs['trunk'])
+			if not trunk:
+				raise ValueError(f'Router() can not find trunk interface {kwargs["trunk"]}, is physically inserted?')
+			self.trunk_index = trunk[0]
+
+			bridge_lookup = ip.link_lookup(ifname=kwargs['ifname'])
+			if not bridge_lookup:
+				ip.link('add', ifname=kwargs['ifname'], kind='bridge')
+				self.index = ip.link_lookup(ifname=kwargs['ifname'])[0]
+			else:
+				self.index = bridge_lookup[0]
+
+			if kwargs['input'] is None:
+				kwargs['input'] = NetworkPipe(f'{kwargs["ifname"]}-p0', f'{kwargs["ifname"]}-sink0')
+
 			ip.link("set", index=self.trunk_index, master=self.index) # Slave trunk to this router (bridge)
 			ip.link("set", index=kwargs['input'].ports['target'], master=self.index) # Slave the routers port-0 sink to this router
 
@@ -371,7 +452,8 @@ class Router():
 
 	def connect(self, what, *args, **kwargs):
 		if what != int: what = ip.link_lookup(ifname=what)[0]
-		ip.link("set", index=what, master=self.index)
+		kwargs['input'].connect(what)
+		#ip.link("set", index=what, master=self.index)
 
 	def nat(self, *args, **kwargs):
 		pass
@@ -391,7 +473,7 @@ class NetworkPipe():
 			try:
 				ip.link('add', ifname=source, kind='veth', peer=target)
 			except netlink.exceptions.NetlinkError:
-				raise KeyError(f'NetworkPipe() says {source} or {target} already exists.')
+				print(f'[N] {source} and {target} already exists, wrapping them.')
 			self.ports = {
 				'source' : ip.link_lookup(ifname=source)[0],
 				'target' : ip.link_lookup(ifname=target)[0]
@@ -408,15 +490,37 @@ class NetworkPipe():
 		with IPRoute() as ip:
 			ip.link("del", index=self.ports['source'])
 
+	def connect(self, what, *args, **kwargs):
+		ip.link("set", index=what, master=self.ports['source'])
+
+class CD():
+	def __init__(self, *args, **kwargs):
+		if not 'filename' in kwargs:
+			if len(args) and args[0]:
+				kwargs['filename'] = args[0]
+			else:
+				raise KeyError('CD() needs a filename.')
+		if not 'readonly' in kwargs: kwargs['readonly'] = True
+		if not os.path.isfile(kwargs['filename']):
+			raise ValueError(f'CD() can\'t access {args["filename"]}')
+
+		for key, val in kwargs.items():
+			self.__dict__[key] = val
+
+	def eject(self):
+		pass
+
 class Harddrive():
 	def __init__(self, *args, **kwargs):
 		if not 'filename' in kwargs: kwargs['filename'] = 'harddrive0.qcow2'
+		if not 'format' in kwargs: kwargs['format'] = 'qcow2'
 		if not 'snapshots' in kwargs:
 			kwargs['snapshots'] = OD()
 			for file in glob(f'{kwargs["filename"]}.snap*'):
 				kwargs['snapshots'][file] = None
 		if not 'size' in kwargs: kwargs['size'] = 5 # in GB
 
+		kwargs['filename'] = os.path.abspath(kwargs['filename'])
 		# qemu-img create -f qcow2 disk.qcow2 5GB
 		# qemu-img create -o backing_file=disk.qcow2,backing_fmt=qcow2 -f qcow2 snapshot0.cow
 
@@ -424,31 +528,41 @@ class Harddrive():
 			self.__dict__[key] = val
 
 		if not os.path.isfile(self.filename):
-			if not self.create(self.filename, self.size):
+			if not self.create(**kwargs):
 				raise ValueError(f'Could not create virtual harddrive image: {self.filename}')
 
-	def create(self, filename, size, *args, **kwargs):
-		o = sys_command(f'qemu-img create -f qcow2 {filename} {size}G')
-		if not os.path.isfile(filename):
+	def create(self, *args, **kwargs):
+		if not 'format' in kwargs: kwargs['format'] = self.format
+		if not 'size' in kwargs: kwargs['size'] = self.size
+		if not 'filename' in kwargs: raise KeyError('No filename given to Harddrive().create()')
+		if kwargs['filename'][0] != '/': kwargs['filename'] = os.path.abspath(kwargs['filename'])
+
+		o = sys_command('qemu-img create -f qcow2 {filename} {size}G'.format(**kwargs))
+		if not os.path.isfile(kwargs['filename']):
 			return None
+		
 		return True
 
 	def snapshot(self, *args, **kwargs):
-		if len(self.snapshots):
-			latest = list(self.snapshots)[-1]
-			latest_num_pos = latest.find('.snap')
-			filename = latest[0:latest_num_pos]
-			num = int(latest[latest_num_pos+5:])
+		if not 'machine' in kwargs:
+			if len(self.snapshots):
+				latest = list(self.snapshots)[-1]
+				latest_num_pos = latest.find('.snap')
+				filename = latest[0:latest_num_pos]
+				num = int(latest[latest_num_pos+5:])
 
-			snapshot_what = latest
-			snapshot_to = f'{filename}.snap{num+1}'
+				snapshot_what = latest
+				snapshot_to = f'{filename}.snap{num+1}'
 
+			else:
+				snapshot_what = self.filename
+				snapshot_to = f'{self.filename}.snap0'
+
+			shutil.copy2(snapshot_what, snapshot_to)
+			self.snapshots[snapshot_to] = None
 		else:
-			snapshot_what = self.filename
-			snapshot_to = f'{self.filename}.snap0'
-
-		shutil.copy2(snapshot_what, snapshot_to)
-		self.snapshots[snapshot_to] = None
+			pass
+			# qemu: snapshot_blkdev -n device [new-image-file] [format]
 
 	def wipe(self, *args, **kwargs):
 		for snapshot in self.snapshots:
@@ -456,6 +570,168 @@ class Harddrive():
 
 		if not 'snapshots_only' in kwargs:
 			os.remove(self.filename)
+
+	def resize(self, new_size, *args, **kwargs):
+		pass
+
+class Machine(threaded, simplified_client_socket):
+	""" A place holder for a KVM state"""
+	# https://qemu.weilnetz.de/doc/qemu-doc.html
+	# https://github.com/cirosantilli/linux-cheat/blob/master/qemu.md
+	def __init__(self, *args, **kwargs):
+		threaded.__init__(self)
+		if not 'harddrives' in kwargs: kwargs['harddrives'] = Harddrive()
+		if not 'nics' in kwargs: kwargs['nics'] = [NetworkPipe()]
+		if not 'cd' in kwargs: kwargs['cd'] = None
+		if not 'name' in kwargs: kwargs['name'] = 'Machine0'
+		if not 'monitor' in kwargs: kwargs['monitor'] = ('localhost', 4444) # -monitor telnet::444,server,nowait / -qmp for control mode
+		if not 'memory' in kwargs: kwargs['memory'] = 4096
+		if not 'efi' in kwargs: kwargs['efi'] = True
+		if not 'monitor_port' in kwargs: kwargs['monitor_port'] = 4000
+
+		if not 'display' in kwargs: kwargs['display'] = None # = '-nographic'
+
+		if type(kwargs['harddrives']) != list: kwargs['harddrives'] = [kwargs['harddrives']]
+		if type(kwargs['nics']) != list: kwargs['nics'] = [kwargs['nics']]
+
+		for key, val in kwargs.items():
+			self.__dict__[key] = val
+
+		self.alive = True
+
+		self.setName(kwargs['name'])
+		simplified_client_socket.__init__(self, '127.0.0.1', self.monitor_port)
+
+	def __repr__(self, *args, **kwargs):
+		return f'<Machine(name={self.name}, cd={self.cd}, hdd={self.harddrives}, nics={self.nics})>'
+
+	def is_alive(self, *args, **kwargs):
+		pass
+
+	def start_vm(self, *args, **kwargs):
+		params = '-enable-kvm -machine q35,accel=kvm -device intel-iommu'
+		params += f' -cpu host'
+		if self.display is None:
+			params += f' -display none'
+		else:
+			raise ValueError('Machine() Non-non-graphical mode is not supported yet.')
+		params += f' -m {self.memory}'
+		if self.cd:
+			params += f" -drive id=cdrom0,if=none,format=raw,readonly=on,file={self.cd.filename}"
+			params += " -device virtio-scsi-pci,id=scsi0"
+			params += " -device scsi-cd,bus=scsi0.0,drive=cdrom0,bootindex=1"
+
+		for harddrive in self.harddrives:
+			params += f" -drive file={harddrive.filename},format=qcow2" # TODO: get this string from the Harddrive() + get format
+
+		if self.efi:
+			params += f" -drive if=pflash,format=raw,readonly,file=/usr/share/ovmf/x64/OVMF_CODE.fd"
+			params += f" -drive if=pflash,format=raw,readonly,file=/usr/share/ovmf/x64/OVMF_VARS.fd"
+
+		params += f' -monitor tcp:127.0.0.1:{self.monitor_port},server,nowait'
+
+		#for nic in self.nics:
+		#	As for manual steps,  they might look like this:
+		#	# ip link add qemu1-h type veth peer name qemu1-g
+		#	# ip link set qemu1-g netns qemu1
+		#	# ip netns exec qemu1 ip link add link qemu1-g type macvtap mode vepa
+		#	# ip netns exec qemu1 ip link set macvtap0 up
+
+		#	To pass macvtap to qemu, look at /dev/tapX device and redirect it to qemu.
+
+		#	For example:
+
+		#	# ip netns exec qemu1 /opt/qemu/current/bin/qemu-system-x86_64 -enable-kvm \
+		#	-m 1024 -netdev tap,id=netdev1,vhost=on,fd=6 6<>/dev/tap6 \
+		#	-device virtio-net-pci,id=nic1,addr=0x0a,mac=02:d6:c0:2c:ab:a1,netdev=netdev1
+
+		self.start_thread(f'qemu-system-x86_64 {params}')
+		print(f'[N] {self} has started, qemu interface at 127.0.0.1:{self.monitor_port}')
+
+	def is_running(self, *args, **kwargs):
+		return self.alive
+
+	def stop(self, *args, **kwargs):
+		pass
+		# qemu: stop / system_powerdown
+
+	def freeze(self, *args, **kwargs):
+		pass
+		# qemu: stop
+
+	def unfreeze(self, *args, **kwargs):
+		pass
+		# qemu: cont   (not continue)
+
+	def snapshot(self, *args, **kwargs):
+		self.freeze()
+		# qemu: savevm [tag]
+		for harddrive in self.harddrives:
+			harddrive.snapshot()
+		self.unfreeze()
+
+	def load_snapshot(self, tag, *args, **kwargs):
+		pass
+		# qemu: loadvm tag
+
+	def delete_snapshot(self, tag, *args, **kwargs):
+		pass
+		# qemu: delvm tag
+
+	def increase_ram(self, new_size, *args, **kwargs):
+		pass
+
+	def resize_harddrive(self, target, new_size, *args, **kwargs):
+		self.harddrives[target].resize(new_size)
+
+	def change_boot_device(self, new_device, *args, **kwargs):
+		pass
+
+	def create_chardev(self, *args, **kwargs):
+		pass
+		## -chardev tty,id=id,path=path
+		## -chardev stdio,id=id[,signal=on|off]
+		## -chardev socket,id=id[,TCP options or unix options][,server][,nowait][,telnet][,websocket][,reconnect=seconds][,tls-creds=id][,tls-authz=id]
+	
+	def dump_memory(self, *args, **kwargs):
+		if not 'filename' in kwargs: kwargs['filename'] = self.name + '.mem_dump0'
+		pass
+
+	def eject(self, *args, **kwargs):
+		self.cd.eject()
+
+	def migrate(self, *args, **kwargs):
+		pass
+
+	def mouse_move(self, *args, **kwargs):
+		pass
+
+	def mouse_click(self, *args, **kwargs):
+		pass
+
+	def add_nic(self, *args, **kwargs):
+		pass
+
+	def del_nic(self, *args, **kwargs):
+		pass
+
+	def screenshot(self, *args, **kwargs):
+		self.send(f'screendump {os.getcwd()}/testing.png\n')
+		# qemu: screendump filename [device [head]]
+
+	def send_key(self, key_string, *args, **kwargs):
+		pass
+		# qemu: sendkey keys [hold_ms]
+
+	def nic_state(self, state, *args, **kwargs):
+		pass
+		# qemu: set_link name on|off
+
+	def delete_nic(self, *args, **kwargs):
+		self.del_nic(*args, **kwargs)
+	def remove_nic(self, *args, **kwargs):
+		self.del_nic(*args, **kwargs)
+
 
 def create_virtual_harddrive(*args, **kwargs):
 	pass
@@ -472,14 +748,34 @@ def create_virtual_router(*args, **kwargs):
 
 if __name__ == '__main__':
 	update_interface_cache()
+
 	del(interfaces['wlp0s20f3']['raw_data'])
-	print(json.dumps(interfaces['wlp0s20f3'], indent=4, default=lambda o: str(o)))
+	print('WiFi interface:', json.dumps(interfaces['wlp0s20f3'], indent=4, default=lambda o: str(o)))
 
 	router = Router('ens4u1')
 	router.delete()
+
+	switch = Switch()
+	switch.delete()
 
 	harddrive = Harddrive(filename='test0.qcow2')
 	harddrive.snapshot()
 
 	harddrive.wipe(snapshots_only=True)
 
+	archlinux_live_cd = CD('/home/anton/archinstall_iso/out/archlinux-2019.11.29-x86_64.iso', readonly=True)
+
+	machine = Machine(harddrives=harddrive, nics=switch, cd=archlinux_live_cd)
+	machine.start_vm()
+
+	while machine.is_alive() or machine.exit_code is None:
+		qemu_output = machine.recv()
+		if qemu_output:
+			print(qemu_output.decode('UTF-8'))
+			if b'monitor -' in qemu_output:
+				machine.screenshot()
+			elif b'screendump ' in qemu_output:
+				machine.send('quit\n')
+		time.sleep(1)
+
+	print('Machine has terminated.')
