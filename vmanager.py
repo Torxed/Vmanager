@@ -465,37 +465,6 @@ class NetworkNameSpace():
 		pass
 
 class VirtualNic():
-	""" Creates a vethX <-> vethY interface chain"""
-	# https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/6/html/virtualization_administration_guide/sect-attch-nic-physdev
-	# https://unix.stackexchange.com/questions/561201/get-which-dev-tapx-got-associated-to-a-macvtap-without-guessing
-	
-	#try:
-	#	ip.link('set', )
-	#except netlink.exceptions.NetlinkError:
-	#	print(f'[N] {source} and {target} already exists, wrapping them.')
-	#/sys/class/net/macvtap0/tap[0-9]+
-
-	#	As for manual steps,  they might look like this:
-	#	# ip link add qemu1-h type veth peer name qemu1-g
-	#	# ip link set qemu1-g netns qemu1
-	#	# ip netns exec qemu1 ip link add link qemu1-g type macvtap mode vepa
-	#	# ip netns exec qemu1 ip link set macvtap0 up
-
-	#	To pass macvtap to qemu, look at /dev/tapX device and redirect it to qemu.
-
-	#	For example:
-
-	#	# ip netns exec qemu1 /opt/qemu/current/bin/qemu-system-x86_64 -enable-kvm \
-	#	-m 1024 -netdev tap,id=netdev1,vhost=on,fd=6 6<>/dev/tap6 \
-	#	-device virtio-net-pci,id=nic1,addr=0x0a,mac=02:d6:c0:2c:ab:a1,netdev=netdev1
-
-	"""
-	ip netns add net1
-	ip netns add net2
-	ip link add veth1 netns net1 type veth peer name veth2 netns net2
-	or without network namespaces:
-	ip link add veth1 type veth peer name veth2
-	"""
 	def __init__(self, source, sink, *args, **kwargs):
 		if not 'namespace' in kwargs: kwargs['namespace'] = None
 		for key, val in kwargs.items():
@@ -764,24 +733,6 @@ class Machine(threaded, simplified_client_socket):
 
 		for nic in self.nics:
 			params += nic.qemu_string()
-
-		#for nic in self.nics:
-		#	As for manual steps,  they might look like this:
-		#	# ip link add qemu1-h type veth peer name qemu1-g
-		#	# ip link set qemu1-g netns qemu1
-		#	# ip netns exec qemu1 ip link add link qemu1-g type macvtap mode vepa
-		#	# ip netns exec qemu1 ip link set macvtap0 up
-
-		#	To pass macvtap to qemu, look at /dev/tapX device and redirect it to qemu.
-
-		#	For example:
-
-		#	# ip netns exec qemu1 /opt/qemu/current/bin/qemu-system-x86_64 -enable-kvm \
-		#	-m 1024 -netdev tap,id=netdev1,vhost=on,fd=6 6<>/dev/tap6 \
-		#	-device virtio-net-pci,id=nic1,addr=0x0a,mac=02:d6:c0:2c:ab:a1,netdev=netdev1
-
-		#print('DEBUG, staring machine with:')
-		#fprint(params)
 
 		self.start_thread(f'/bin/bash -c \'ip netns exec {self.namespace} qemu-system-x86_64 {params}\'')
 		print(f'[N] {self} has started.')
