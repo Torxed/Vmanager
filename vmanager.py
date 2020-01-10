@@ -1,4 +1,4 @@
-from socket import AF_INET, socket
+from socket import AF_INET, socket, AF_UNIX, SOCK_DGRAM
 from pyroute2 import IPRoute, IPDB, netlink, NetNS, netns
 from collections import OrderedDict as OD
 from random import randint # TODO: Replace
@@ -109,18 +109,22 @@ def sys_command(cmd, opts=None, *args, **kwargs):
 	return output
 
 class simplified_client_socket():
-	def __init__(self, target, port, *args, **kwargs):
+	def __init__(self, target, *args, **kwargs):
 		self.data = b''
 		self.data_pos = 0
 		self._poll = epoll()
 		self.target = target
-		self.port = port
+		self.connect()
+
+	def connect(self, *args, **kwargs):
 		try:
-			self.socket = socket()
-			self.socket.connect((self.target, self.port))
+			self.socket = socket(AF_UNIX)
+			self.socket.connect(self.target)
 			self._poll.register(self.socket.fileno(), EPOLLIN | EPOLLHUP)
-		except:
+		except FileNotFoundError:
 			self.socket = None
+			return None
+		return True
 
 	def poll(self, timeout=0.001, fileno=None):
 		d = dict(self._poll.poll(timeout))
@@ -129,12 +133,7 @@ class simplified_client_socket():
 
 	def recv(self, buffert=8192):
 		if not self.socket:
-			try:
-				self.socket = socket()
-				self.socket.connect((self.target, self.port))
-				self._poll.register(self.socket.fileno(), EPOLLIN | EPOLLHUP)
-			except:
-				self.socket = None
+			if not self.connect():
 				return None
 
 		if self.poll(fileno=self.socket.fileno()):
@@ -156,12 +155,7 @@ class simplified_client_socket():
 
 	def send(self, data):
 		if not self.socket:
-			try:
-				self.socket = socket()
-				self.socket.connect((self.target, self.port))
-				self._poll.register(self.socket.fileno(), EPOLLIN | EPOLLHUP)
-			except:
-				self.socket = None
+			if not self.connect():
 				return None
 
 		if type(data) != bytes: data = bytes(data, 'UTF-8')
@@ -551,11 +545,47 @@ class VirtualNic():
 				ip.link('set', index=self.ports['sink'], net_ns_fd=namespace)
 			except:
 				print(f'[N] VNic can\'t change namespace for {self.ports["sink_name"]}. Most likely because it\'s already enslaved to a namespace.')
-			self.ports['sink_name'] = self.ports['sink_name'] + '@' + namespace
+
+		# Because NetNS() or IPRoute() or IPDB() appears to be lacking the support to create
+		# interfaces within a namespace, we'll have to revert to shell-commands.
+		o = sys_command(f'ip netns exec {namespace} ip link add link {self.ports["sink_name"]} type macvtap mode bridge')
+		if len(o) <= 0:
+			pass
+		else:
+			print(f'[E] Could not create a virtual macvtap for {self.ports["sink_name"]}')
+			print(o)
+
+		self.tap_interface = None
+		o = sys_command(f"ip netns exec {self.namespace} /bin/bash -c 'ls /sys/class/net/macvtap0/'")
+		for file in o.decode('UTF-8').split('\n'):
+			if file[:3] == 'tap':
+				self.tap_interface = file
+				break
+
+		if not self.tap_interface:
+			print('[E] VirtualNic() could not create a virtual macvtap for the tap interface.')
+#		with NetNS(namespace) as ns:
+#			with IPDB(nl=ns) as ip:
+#				ip.link('add', ifname=self.ports['sink'], kind='macvtap') #mode=vepa | bridge(default)
+
+		self.ports['sink_name'] = self.ports['sink_name'] + '@' + namespace
+		self.namespace = namespace
 
 	def qemu_string(self, *args, **kwargs):
-		tap_interface = os.path.basename(glob(f'/sys/class/net/macvtap0/tap*')[0])
-		return f' -net nic,model=virtio,addr=1a:46:0b:ca:bc:7b -net tap,fd=1 1<>/dev/{tap_interface}'
+		if self.namespace and not self.tap_interface:
+			print('[E] Can not use this NIC, namespace given but no macvtap located.')
+			return None
+
+		if self.namespace:
+			#	tap6 \
+			#	
+			params = f' -netdev tap,id=netdev1,vhost=on,fd=6 6<>/dev/{self.tap_interface}'
+			params += f' -device virtio-net-pci,id=nic1,addr=0x0a,mac=02:d6:c0:2c:ab:a1,netdev=netdev1'
+		else:
+			params = f' -netdev tap,ifname={self.tap_interface},id=network0,script=no,downscript=no'
+			params += f' -device i82559b,netdev=network0,mac=1a:46:0b:ca:bc:7b'
+
+		return params
 
 class CD():
 	def __init__(self, *args, **kwargs):
@@ -695,10 +725,10 @@ class Machine(threaded, simplified_client_socket):
 
 		self.alive = True
 
-		simplified_client_socket.__init__(self, '127.0.0.1', self.monitor_port)
+		simplified_client_socket.__init__(self, f'/tmp/{kwargs["name"]}_socket')
 
 	def __repr__(self, *args, **kwargs):
-		return f'Machine(name={self.name}, cd={self.cd}, hdd\'s={self.harddrives}, nics={self.nics})'
+		return f'Machine(name={self.name}, cd={self.cd}, hdd\'s={self.harddrives}, nics={self.nics} monitor=/tmp/{self.name}_socket)'
 
 	def is_alive(self, *args, **kwargs):
 		pass
@@ -729,7 +759,8 @@ class Machine(threaded, simplified_client_socket):
 			print(nic)
 
 		# Add a monitor port to the qemu console, so that we can control this VM after startup.
-		params += f' -monitor tcp:127.0.0.1:{self.monitor_port},server,nowait'
+		#params += f' -monitor tcp:127.0.0.1:{self.monitor_port},server,nowait'
+		params += f' -monitor unix:/tmp/{self.name}_socket,server,nowait'
 
 		for nic in self.nics:
 			params += nic.qemu_string()
@@ -752,8 +783,8 @@ class Machine(threaded, simplified_client_socket):
 		#print('DEBUG, staring machine with:')
 		#fprint(params)
 
-		self.start_thread(f'qemu-system-x86_64 {params}')
-		print(f'[N] {self} has started, qemu interface at 127.0.0.1:{self.monitor_port}')
+		self.start_thread(f'/bin/bash -c \'ip netns exec {self.namespace} qemu-system-x86_64 {params}\'')
+		print(f'[N] {self} has started.')
 
 	def is_running(self, *args, **kwargs):
 		return self.alive
@@ -878,11 +909,13 @@ if __name__ == '__main__':
 	while machine.is_alive() or machine.exit_code is None:
 		qemu_output = machine.recv()
 		if qemu_output:
-			print(qemu_output.decode('UTF-8'))
+#			print(qemu_output.decode('UTF-8'))
 			if b'monitor -' in qemu_output:
 				time.sleep(3)
+				print('[N] Taking a screenshot.')
 				machine.screenshot()
 			elif b'screendump ' in qemu_output:
+				print('[N] Sending quit to the machine.')
 				machine.send('quit\n')
 		time.sleep(1)
 
