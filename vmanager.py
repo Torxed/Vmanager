@@ -17,6 +17,11 @@ import json #DEB
 # Great information source:
 #   https://developers.redhat.com/blog/2018/10/22/introduction-to-linux-interfaces-for-virtual-networking/
 #   https://blog.scottlowe.org/2013/09/04/introducing-linux-network-namespaces/
+#   https://linux-blog.anracom.com/tag/linux-bridge-linking/
+#   https://unix.stackexchange.com/questions/272146/packets-not-moving-through-linux-ethernet-bridge
+#   - https://serverfault.com/questions/540671/filter-broadcast-traffic-in-a-bridge-port
+#   - http://www.microhowto.info/troubleshooting/troubleshooting_ethernet_bridging_on_linux.html
+#   http://hicu.be/bridge-vs-macvlan
 
 ## Build a cache with our interfaces before we begin setting things up.
 default_routes = {}
@@ -159,7 +164,10 @@ class simplified_client_socket():
 				return None
 
 		if type(data) != bytes: data = bytes(data, 'UTF-8')
-		self.socket.send(data)
+		try:
+			self.socket.send(data)
+		except BrokenPipeError:
+			pass
 
 class threaded(Thread):
 	def __init__(self, callback=None, start_callback=None, *args, **kwargs):
@@ -318,14 +326,17 @@ class Interface():
 		self._ip = kwargs['ip']
 
 	def up(self, *args, **kwargs):
+		print(f'[N] Interface() up on {self}')
 		with IPRoute() as ip:
 			ip.link("set", index=self.index, state="up")
 
 	def down(self, *args, **kwargs):
+		print(f'[N] Interface() down on {self}')
 		with IPRoute() as ip:
 			ip.link("set", index=self.index, state="down")
 
 	def master(self, ifname, *args, **kwargs):
+		print(f'[N] Interface() setting master on {self} to {ifname}')
 		with IPRoute() as ip:
 			ip.link("set",
 				index=self.index,
@@ -379,6 +390,12 @@ class Switch():
 		if 'interface' in kwargs: ifname = kwargs['interface']
 		if not ifname: ifname = 'switch0'
 
+		self.ifname = ifname
+		self.connections = {}
+
+		with open('/proc/sys/net/bridge/bridge-nf-call-iptables', 'w') as iptables:
+			iptables.write('0\n')
+
 		with IPRoute() as ip:
 			switch_lookup = ip.link_lookup(ifname=ifname)
 			if not switch_lookup:
@@ -390,10 +407,16 @@ class Switch():
 				interface_index = ip.link_lookup(ifname=interface)[0]
 				if interface_index:
 					ip.link("set", index=interface_index, master=self.index)
+				self.connections[interface] = True
+
+			ip.link('set', index=self.index, state='up')
 
 	def connect(self, what, *args, **kwargs):
-		if what != int: what = ip.link_lookup(ifname=what)[0]
-		ip.link("set", index=what, master=self.index)
+		print(f'[N] {self} is enslaving {what}.')
+		if type(what) != int: what = ip.link_lookup(ifname=what)[0]
+
+		with IPRoute() as ip:
+			ip.link("set", index=what, master=self.index)
 
 	def delete(self, *args, **kwargs):
 		#for port in self.ports:
@@ -401,6 +424,9 @@ class Switch():
 
 		with IPRoute() as ip:
 			ip.link("del", index=self.index)
+
+	def __repr__(self, *args, **kwargs):
+		return f'Switch(name={self.ifname}, ports={list(self.connections.keys())})'
 
 class Router():
 	""" Creates a bridge <-> interface link with a in and out side"""
@@ -425,6 +451,9 @@ class Router():
 				raise ValueError(f'Router() can not find trunk interface {kwargs["trunk"]}, is physically inserted?')
 			self.trunk_index = trunk[0]
 
+			with open('/proc/sys/net/bridge/bridge-nf-call-iptables', 'w') as iptables:
+				iptables.write('0\n')
+
 			bridge_lookup = ip.link_lookup(ifname=kwargs['ifname'])
 			if not bridge_lookup:
 				ip.link('add', ifname=kwargs['ifname'], kind='bridge')
@@ -435,10 +464,13 @@ class Router():
 			if kwargs['input'] is None:
 				kwargs['input'] = VirtualNic(f'{kwargs["ifname"]}-p0', f'{kwargs["ifname"]}-sink0', namespace=False)
 
-			print(f'[N] Router() is enslaving {kwargs["input"]}')
+			print(f'[N] Router() is enslaving {kwargs["trunk"]} and {kwargs["ifname"]}-sink0')
 
 			ip.link("set", index=self.trunk_index, master=self.index) # Slave trunk to this router (bridge)
-			ip.link("set", index=kwargs['input'].ports['source'], master=self.index) # Slave the routers port-0 sink to this router
+			ip.link("set", index=kwargs['input'].ports['sink'], master=self.index) # Slave the routers port-0 sink to this router
+
+			kwargs['input'].up()
+			ip.link('set', index=self.index, state='up')
 
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
@@ -448,9 +480,13 @@ class Router():
 		with IPRoute() as ip:
 			ip.link("del", index=self.index)
 
-	def connect(self, what, *args, **kwargs):
-		if what != int: what = ip.link_lookup(ifname=what)[0]
-		kwargs['input'].connect(what)
+	def connect(self, what, target, *args, **kwargs):
+		what = f'{self.ifname}-{what}'
+		if type(what) != int:
+			with IPRoute() as ip:
+				source_index = ip.link_lookup(ifname=what)[0]
+		print(f'[N] Router() is connecting {what} to {target}')
+		target.connect(source_index, target)
 		#ip.link("set", index=what, master=self.index)
 
 	def nat(self, *args, **kwargs):
@@ -467,6 +503,7 @@ class NetworkNameSpace():
 class VirtualNic():
 	def __init__(self, source, sink, *args, **kwargs):
 		if not 'namespace' in kwargs: kwargs['namespace'] = None
+		if not 'mac' in kwargs: kwargs['mac'] = '02:d6:c0:2c:ab:a1'
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
 
@@ -492,14 +529,41 @@ class VirtualNic():
 				self.set_namespace(kwargs['namespace'])
 
 	def __repr__(self, *args, **kwargs):
-		return f'VNic("{self.ports["source_name"]} <--> {self.ports["sink_name"]}")'
+		sink_repr = self.ports["sink_name"]
+		if self.namespace: sink_repr += '@'+self.namespace
+		return f'VNic("{self.ports["source_name"]} <--> {sink_repr}")'
 
 	def delete(self, *args, **kwargs):
 		with IPRoute() as ip:
 			ip.link("del", index=self.ports['source'])
 
-	def connect(self, what, *args, **kwargs):
-		ip.link("set", index=what, master=self.ports['source'])
+	def up(self, *args, **kwargs):
+		print(f'[N] VNic() up on {self}')
+		with IPRoute() as ip:
+			ip.link('set', index=self.ports['source'], state='up')
+			if not self.namespace:
+				ip.link('set', index=self.ports['sink'], state='up')
+			else:
+				o = sys_command(f"ip netns exec {self.namespace} /bin/bash -c 'ip link set dev {self.ports['sink_name']} up'")
+
+	def down(self, *args, **kwargs):
+		print(f'[N] VNic() down on {self}')
+		with IPRoute() as ip:
+			ip.link('set', index=self.ports['source'], state='down')
+			if not self.namespace:
+				ip.link('set', index=self.ports['sink'], state='down')
+			else:
+				o = sys_command(f"ip netns exec {self.namespace} /bin/bash -c 'ip link set dev {self.ports['sink_name'].split('@',1)[0]} down'")
+
+	def connect(self, what, target=None, *args, **kwargs):
+		if target:
+			print(f'[N] {self} is enslaving {what} to {self.ports["source_name"]}')
+			with IPRoute() as ip:
+				if type(what) != int: what = ip.link_lookup(ifname=what)[0]
+				ip.link("set", index=what, master=self.ports['source'])
+		else:
+			print(f'[N] {self} is connecting to {what}')
+			what.connect(self.ports['source'])
 
 	def set_namespace(self, namespace, *args, **kwargs):
 		print(f'[N] VNic setting namespace "{namespace}" for {self.ports["sink_name"]}(index: {self.ports["sink"]})')
@@ -519,13 +583,13 @@ class VirtualNic():
 		# interfaces within a namespace, we'll have to revert to shell-commands.
 		o = sys_command(f'ip netns exec {namespace} ip link add link {self.ports["sink_name"]} type macvtap mode bridge')
 		if len(o) <= 0:
-			pass
+			o = sys_command(f"ip netns exec {namespace} /bin/bash -c 'ip link set macvtap0 address {self.mac} up'")
 		else:
 			print(f'[E] Could not create a virtual macvtap for {self.ports["sink_name"]}')
 			print(o)
 
 		self.tap_interface = None
-		o = sys_command(f"ip netns exec {self.namespace} /bin/bash -c 'ls /sys/class/net/macvtap0/'")
+		o = sys_command(f"ip netns exec {namespace} /bin/bash -c 'ls /sys/class/net/macvtap0/'")
 		for file in o.decode('UTF-8').split('\n'):
 			if file[:3] == 'tap':
 				self.tap_interface = file
@@ -537,7 +601,6 @@ class VirtualNic():
 #			with IPDB(nl=ns) as ip:
 #				ip.link('add', ifname=self.ports['sink'], kind='macvtap') #mode=vepa | bridge(default)
 
-		self.ports['sink_name'] = self.ports['sink_name'] + '@' + namespace
 		self.namespace = namespace
 
 	def qemu_string(self, *args, **kwargs):
@@ -549,10 +612,10 @@ class VirtualNic():
 			#	tap6 \
 			#	
 			params = f' -netdev tap,id=netdev1,vhost=on,fd=6 6<>/dev/{self.tap_interface}'
-			params += f' -device virtio-net-pci,id=nic1,addr=0x0a,mac=02:d6:c0:2c:ab:a1,netdev=netdev1'
+			params += f' -device virtio-net-pci,id=nic1,addr=0x0a,mac={self.mac},netdev=netdev1'
 		else:
 			params = f' -netdev tap,ifname={self.tap_interface},id=network0,script=no,downscript=no'
-			params += f' -device i82559b,netdev=network0,mac=1a:46:0b:ca:bc:7b'
+			params += f' -device i82559b,netdev=network0,mac={self.mac}'
 
 		return params
 
@@ -575,7 +638,6 @@ class CD():
 
 	def eject(self):
 		pass
-
 
 	def qemu_string(self, boot_index, *args, **kwargs):
 		params = f" -drive id=cdrom0,if=none,format=raw,readonly=on,file={self.filename}"
@@ -681,7 +743,9 @@ class Machine(threaded, simplified_client_socket):
 			# Non specific nics given, just the ammount that we want
 			nics = []
 			for index in range(kwargs['nics']):
-				nics.append(VirtualNic(f"{kwargs['name']}-sink{index}", f"{kwargs['name']}-p{index}", namespace=kwargs['namespace']))
+				nic = VirtualNic(f"{kwargs['name']}-p{index}", f"{kwargs['name']}-sink{index}", namespace=kwargs['namespace'])
+				nic.up()
+				nics.append(nic)
 			kwargs['nics'] = nics
 		if type(kwargs['nics']) != list: kwargs['nics'] = [kwargs['nics']]
 
@@ -702,6 +766,12 @@ class Machine(threaded, simplified_client_socket):
 	def is_alive(self, *args, **kwargs):
 		pass
 
+	def delete(self, *args, **kwargs):
+		self.stop()
+		for nic in self.nics:
+			nic.delete()
+		netns.remove(self.namespace)
+
 	def start_vm(self, *args, **kwargs):
 		params = '-enable-kvm'
 		params += ' -machine q35,accel=kvm'
@@ -710,8 +780,6 @@ class Machine(threaded, simplified_client_socket):
 
 		if self.display is None:
 			params += f' -display none'
-		else:
-			raise ValueError('Machine() Graphical mode is not supported yet.')
 		
 		params += f' -m {self.memory}'
 		if self.cd:
@@ -724,9 +792,6 @@ class Machine(threaded, simplified_client_socket):
 			params += f" -drive if=pflash,format=raw,readonly,file=/usr/share/ovmf/x64/OVMF_CODE.fd"
 			params += f" -drive if=pflash,format=raw,readonly,file=/usr/share/ovmf/x64/OVMF_VARS.fd"
 
-		for nic in self.nics:
-			print(nic)
-
 		# Add a monitor port to the qemu console, so that we can control this VM after startup.
 		#params += f' -monitor tcp:127.0.0.1:{self.monitor_port},server,nowait'
 		params += f' -monitor unix:/tmp/{self.name}_socket,server,nowait'
@@ -737,11 +802,15 @@ class Machine(threaded, simplified_client_socket):
 		self.start_thread(f'/bin/bash -c \'ip netns exec {self.namespace} qemu-system-x86_64 {params}\'')
 		print(f'[N] {self} has started.')
 
+		time.sleep(1)
+		for nic in self.nics:
+			nic.up()
+
 	def is_running(self, *args, **kwargs):
 		return self.alive
 
 	def stop(self, *args, **kwargs):
-		pass
+		self.send(b'quit\n') # see below
 		# qemu: stop / system_powerdown
 
 	def freeze(self, *args, **kwargs):
@@ -841,20 +910,25 @@ if __name__ == '__main__':
 	del(interfaces['wlp0s20f3']['raw_data']) # Clear stuff we don't need for printing debug output.
 	print('[N] WiFi interface:', json.dumps(interfaces['wlp0s20f3'], indent=4, default=lambda o: str(o)))
 
+	# Set up a route out to the internet, for test purposes.
 	router = Router('ens4u1')
-	router.delete()
-
 	switch = Switch()
-	switch.delete()
 
+	# Connect routers port 0 to the switch.
+	router.connect('p0', switch)
+
+	# Set up some paraphernalia that the virtual machine can use.
 	harddrive = Harddrive(filename='test0.qcow2')
-	harddrive.snapshot()
-
-	harddrive.wipe(snapshots_only=True)
-
 	archlinux_live_cd = CD('/home/anton/archinstall_iso/out/archlinux-2019.11.29-x86_64.iso', readonly=True)
 
+	# Test the snapshot functionality, then wipe the snapshot :)
+	harddrive.snapshot()
+	harddrive.wipe(snapshots_only=True)
+
+	# Start the virtual machine.
 	machine = Machine(harddrives=harddrive, nics=1, cd=archlinux_live_cd)
+	machine.nics[0].connect(switch)
+
 	machine.start_vm()
 
 	while machine.is_alive() or machine.exit_code is None:
@@ -862,7 +936,7 @@ if __name__ == '__main__':
 		if qemu_output:
 #			print(qemu_output.decode('UTF-8'))
 			if b'monitor -' in qemu_output:
-				time.sleep(3)
+				time.sleep(25)
 				print('[N] Taking a screenshot.')
 				machine.screenshot()
 			elif b'screendump ' in qemu_output:
@@ -871,3 +945,6 @@ if __name__ == '__main__':
 		time.sleep(1)
 
 	print('Machine has terminated.')
+	machine.delete()
+	router.delete()
+	switch.delete()
