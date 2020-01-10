@@ -1,5 +1,5 @@
 from socket import AF_INET, socket
-from pyroute2 import IPRoute, IPDB, netlink
+from pyroute2 import IPRoute, IPDB, netlink, NetNS, netns
 from collections import OrderedDict as OD
 from random import randint # TODO: Replace
 from threading import Thread, enumerate as tenum
@@ -423,6 +423,8 @@ class Router():
 		if not 'ifname' in kwargs: kwargs['ifname'] = 'router0'
 		if not 'input' in kwargs: kwargs['input'] = None
 
+		print(f'[N] Router() is using "{kwargs["trunk"]}" as trunk')
+
 		with IPRoute() as ip:
 			trunk = ip.link_lookup(ifname=kwargs['trunk'])
 			if not trunk:
@@ -437,10 +439,12 @@ class Router():
 				self.index = bridge_lookup[0]
 
 			if kwargs['input'] is None:
-				kwargs['input'] = NetworkPipe(f'{kwargs["ifname"]}-p0', f'{kwargs["ifname"]}-sink0')
+				kwargs['input'] = VirtualNic(f'{kwargs["ifname"]}-p0', f'{kwargs["ifname"]}-sink0', namespace=False)
+
+			print(f'[N] Router() is enslaving {kwargs["input"]}')
 
 			ip.link("set", index=self.trunk_index, master=self.index) # Slave trunk to this router (bridge)
-			ip.link("set", index=kwargs['input'].ports['target'], master=self.index) # Slave the routers port-0 sink to this router
+			ip.link("set", index=kwargs['input'].ports['source'], master=self.index) # Slave the routers port-0 sink to this router
 
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
@@ -466,25 +470,66 @@ class NetworkNameSpace():
 	def __init__(self, *args, **kwargs):
 		pass
 
-class NetworkPipe():
+class VirtualNic():
 	""" Creates a vethX <-> vethY interface chain"""
-	def __init__(self, source, target, *args, **kwargs):
+	# https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/6/html/virtualization_administration_guide/sect-attch-nic-physdev
+	# https://unix.stackexchange.com/questions/561201/get-which-dev-tapx-got-associated-to-a-macvtap-without-guessing
+	
+	#try:
+	#	ip.link('set', )
+	#except netlink.exceptions.NetlinkError:
+	#	print(f'[N] {source} and {target} already exists, wrapping them.')
+	#/sys/class/net/macvtap0/tap[0-9]+
+
+	#	As for manual steps,  they might look like this:
+	#	# ip link add qemu1-h type veth peer name qemu1-g
+	#	# ip link set qemu1-g netns qemu1
+	#	# ip netns exec qemu1 ip link add link qemu1-g type macvtap mode vepa
+	#	# ip netns exec qemu1 ip link set macvtap0 up
+
+	#	To pass macvtap to qemu, look at /dev/tapX device and redirect it to qemu.
+
+	#	For example:
+
+	#	# ip netns exec qemu1 /opt/qemu/current/bin/qemu-system-x86_64 -enable-kvm \
+	#	-m 1024 -netdev tap,id=netdev1,vhost=on,fd=6 6<>/dev/tap6 \
+	#	-device virtio-net-pci,id=nic1,addr=0x0a,mac=02:d6:c0:2c:ab:a1,netdev=netdev1
+
+	"""
+	ip netns add net1
+	ip netns add net2
+	ip link add veth1 netns net1 type veth peer name veth2 netns net2
+	or without network namespaces:
+	ip link add veth1 type veth peer name veth2
+	"""
+	def __init__(self, source, sink, *args, **kwargs):
+		if not 'namespace' in kwargs: kwargs['namespace'] = None
+		for key, val in kwargs.items():
+			self.__dict__[key] = val
+
 		with IPRoute() as ip:
 			try:
-				ip.link('add', ifname=source, kind='veth', peer=target)
+				ip.link('add', ifname=source, kind='veth', peer=sink)
 			except netlink.exceptions.NetlinkError:
-				print(f'[N] {source} and {target} already exists, wrapping them.')
+				print(f'[N] {source} and {sink} already exists, wrapping them.')
+
+		with IPRoute() as ip:
+			sink_index = ip.link_lookup(ifname=sink)
+			if sink_index: sink_index = sink_index[0]
+			else: sink_index = None
+
 			self.ports = {
 				'source' : ip.link_lookup(ifname=source)[0],
-				'target' : ip.link_lookup(ifname=target)[0]
+				'source_name' : source,
+				'sink' : sink_index,
+				'sink_name' : sink
 			}
-		"""
-		ip link netns add net1
-		ip link netns add net2
-		ip link add veth1 netns net1 type veth peer name veth2 netns net2
-		or without network namespaces:
-		ip link add veth1 type veth peer name veth2
-		"""
+
+			if 'namespace' in kwargs and kwargs['namespace']:
+				self.set_namespace(kwargs['namespace'])
+
+	def __repr__(self, *args, **kwargs):
+		return f'VNic("{self.ports["source_name"]} <--> {self.ports["sink_name"]}")'
 
 	def delete(self, *args, **kwargs):
 		with IPRoute() as ip:
@@ -492,6 +537,25 @@ class NetworkPipe():
 
 	def connect(self, what, *args, **kwargs):
 		ip.link("set", index=what, master=self.ports['source'])
+
+	def set_namespace(self, namespace, *args, **kwargs):
+		print(f'[N] VNic setting namespace "{namespace}" for {self.ports["sink_name"]}(index: {self.ports["sink"]})')
+
+		try:
+			netns.create(namespace)
+		except FileExistsError:
+			pass # Already exists, we can use it below.
+
+		with IPRoute() as ip:
+			try:
+				ip.link('set', index=self.ports['sink'], net_ns_fd=namespace)
+			except:
+				print(f'[N] VNic can\'t change namespace for {self.ports["sink_name"]}. Most likely because it\'s already enslaved to a namespace.')
+			self.ports['sink_name'] = self.ports['sink_name'] + '@' + namespace
+
+	def qemu_string(self, *args, **kwargs):
+		tap_interface = os.path.basename(glob(f'/sys/class/net/macvtap0/tap*')[0])
+		return f' -net nic,model=virtio,addr=1a:46:0b:ca:bc:7b -net tap,fd=1 1<>/dev/{tap_interface}'
 
 class CD():
 	def __init__(self, *args, **kwargs):
@@ -507,8 +571,18 @@ class CD():
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
 
+	def __repr__(self, *args, **kwargs):
+		return f'CD({os.path.basename(self.filename)})'
+
 	def eject(self):
 		pass
+
+
+	def qemu_string(self, boot_index, *args, **kwargs):
+		params = f" -drive id=cdrom0,if=none,format=raw,readonly=on,file={self.filename}"
+		params += f" -device virtio-scsi-pci,id=scsi0"
+		params += f" -device scsi-cd,bus=scsi0.0,drive=cdrom0,bootindex={boot_index}"
+		return params
 
 class Harddrive():
 	def __init__(self, *args, **kwargs):
@@ -530,6 +604,9 @@ class Harddrive():
 		if not os.path.isfile(self.filename):
 			if not self.create(**kwargs):
 				raise ValueError(f'Could not create virtual harddrive image: {self.filename}')
+
+	def __repr__(self, *args, **kwargs):
+		return f'HDD({os.path.basename(self.filename)})'
 
 	def create(self, *args, **kwargs):
 		if not 'format' in kwargs: kwargs['format'] = self.format
@@ -574,6 +651,13 @@ class Harddrive():
 	def resize(self, new_size, *args, **kwargs):
 		pass
 
+	def qemu_string(self, boot_index, *args, **kwargs):
+		#return f" -drive file={self.filename},format={self.format}"
+		params = f" -drive id=hdd0,if=none,media=disk,snapshot=off,format={self.format},file={self.filename}"
+		params += f" -device virtio-scsi-pci,id=scsi1"
+		params += f" -device scsi-hd,bus=scsi1.0,drive=hdd0,bootindex={boot_index}"
+		return params
+
 class Machine(threaded, simplified_client_socket):
 	""" A place holder for a KVM state"""
 	# https://qemu.weilnetz.de/doc/qemu-doc.html
@@ -581,54 +665,74 @@ class Machine(threaded, simplified_client_socket):
 	def __init__(self, *args, **kwargs):
 		threaded.__init__(self)
 		if not 'harddrives' in kwargs: kwargs['harddrives'] = Harddrive()
-		if not 'nics' in kwargs: kwargs['nics'] = [NetworkPipe()]
+		if not 'nics' in kwargs: kwargs['nics'] = 0
 		if not 'cd' in kwargs: kwargs['cd'] = None
 		if not 'name' in kwargs: kwargs['name'] = 'Machine0'
+		if not 'namespace' in kwargs: kwargs['namespace'] = kwargs['name'] # Each virtual machine will end up in a namespace.
 		if not 'monitor' in kwargs: kwargs['monitor'] = ('localhost', 4444) # -monitor telnet::444,server,nowait / -qmp for control mode
 		if not 'memory' in kwargs: kwargs['memory'] = 4096
 		if not 'efi' in kwargs: kwargs['efi'] = True
 		if not 'monitor_port' in kwargs: kwargs['monitor_port'] = 4000
 
 		if not 'display' in kwargs: kwargs['display'] = None # = '-nographic'
+		self.setName(kwargs['name'])
 
 		if type(kwargs['harddrives']) != list: kwargs['harddrives'] = [kwargs['harddrives']]
+		if type(kwargs['nics']) in (int, float):
+			# Non specific nics given, just the ammount that we want
+			nics = []
+			for index in range(kwargs['nics']):
+				nics.append(VirtualNic(f"{kwargs['name']}-sink{index}", f"{kwargs['name']}-p{index}", namespace=kwargs['namespace']))
+			kwargs['nics'] = nics
 		if type(kwargs['nics']) != list: kwargs['nics'] = [kwargs['nics']]
+
+		for nic in kwargs['nics']:
+			if not nic.namespace == kwargs['namespace']:
+				nic.set_namespace(kwargs['namespace'])
 
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
 
 		self.alive = True
 
-		self.setName(kwargs['name'])
 		simplified_client_socket.__init__(self, '127.0.0.1', self.monitor_port)
 
 	def __repr__(self, *args, **kwargs):
-		return f'<Machine(name={self.name}, cd={self.cd}, hdd={self.harddrives}, nics={self.nics})>'
+		return f'Machine(name={self.name}, cd={self.cd}, hdd\'s={self.harddrives}, nics={self.nics})'
 
 	def is_alive(self, *args, **kwargs):
 		pass
 
 	def start_vm(self, *args, **kwargs):
-		params = '-enable-kvm -machine q35,accel=kvm -device intel-iommu'
-		params += f' -cpu host'
+		params = '-enable-kvm'
+		params += ' -machine q35,accel=kvm'
+		params += ' -device intel-iommu'
+		params += ' -cpu host'
+
 		if self.display is None:
 			params += f' -display none'
 		else:
-			raise ValueError('Machine() Non-non-graphical mode is not supported yet.')
+			raise ValueError('Machine() Graphical mode is not supported yet.')
+		
 		params += f' -m {self.memory}'
 		if self.cd:
-			params += f" -drive id=cdrom0,if=none,format=raw,readonly=on,file={self.cd.filename}"
-			params += " -device virtio-scsi-pci,id=scsi0"
-			params += " -device scsi-cd,bus=scsi0.0,drive=cdrom0,bootindex=1"
+			params += self.cd.qemu_string(boot_index=1)
 
 		for harddrive in self.harddrives:
-			params += f" -drive file={harddrive.filename},format=qcow2" # TODO: get this string from the Harddrive() + get format
+			params += harddrive.qemu_string(boot_index=2)
 
 		if self.efi:
 			params += f" -drive if=pflash,format=raw,readonly,file=/usr/share/ovmf/x64/OVMF_CODE.fd"
 			params += f" -drive if=pflash,format=raw,readonly,file=/usr/share/ovmf/x64/OVMF_VARS.fd"
 
+		for nic in self.nics:
+			print(nic)
+
+		# Add a monitor port to the qemu console, so that we can control this VM after startup.
 		params += f' -monitor tcp:127.0.0.1:{self.monitor_port},server,nowait'
+
+		for nic in self.nics:
+			params += nic.qemu_string()
 
 		#for nic in self.nics:
 		#	As for manual steps,  they might look like this:
@@ -644,6 +748,9 @@ class Machine(threaded, simplified_client_socket):
 		#	# ip netns exec qemu1 /opt/qemu/current/bin/qemu-system-x86_64 -enable-kvm \
 		#	-m 1024 -netdev tap,id=netdev1,vhost=on,fd=6 6<>/dev/tap6 \
 		#	-device virtio-net-pci,id=nic1,addr=0x0a,mac=02:d6:c0:2c:ab:a1,netdev=netdev1
+
+		#print('DEBUG, staring machine with:')
+		#fprint(params)
 
 		self.start_thread(f'qemu-system-x86_64 {params}')
 		print(f'[N] {self} has started, qemu interface at 127.0.0.1:{self.monitor_port}')
@@ -749,8 +856,8 @@ def create_virtual_router(*args, **kwargs):
 if __name__ == '__main__':
 	update_interface_cache()
 
-	del(interfaces['wlp0s20f3']['raw_data'])
-	print('WiFi interface:', json.dumps(interfaces['wlp0s20f3'], indent=4, default=lambda o: str(o)))
+	del(interfaces['wlp0s20f3']['raw_data']) # Clear stuff we don't need for printing debug output.
+	print('[N] WiFi interface:', json.dumps(interfaces['wlp0s20f3'], indent=4, default=lambda o: str(o)))
 
 	router = Router('ens4u1')
 	router.delete()
@@ -765,7 +872,7 @@ if __name__ == '__main__':
 
 	archlinux_live_cd = CD('/home/anton/archinstall_iso/out/archlinux-2019.11.29-x86_64.iso', readonly=True)
 
-	machine = Machine(harddrives=harddrive, nics=switch, cd=archlinux_live_cd)
+	machine = Machine(harddrives=harddrive, nics=1, cd=archlinux_live_cd)
 	machine.start_vm()
 
 	while machine.is_alive() or machine.exit_code is None:
@@ -773,6 +880,7 @@ if __name__ == '__main__':
 		if qemu_output:
 			print(qemu_output.decode('UTF-8'))
 			if b'monitor -' in qemu_output:
+				time.sleep(3)
 				machine.screenshot()
 			elif b'screendump ' in qemu_output:
 				machine.send('quit\n')
