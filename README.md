@@ -1,4 +1,4 @@
-# Vmanager
+# ![logo](logo_small.png) Vmanager
 Virtual Manager - To manage KVM based machines
 
 # What is it?
