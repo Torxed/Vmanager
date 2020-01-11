@@ -751,6 +751,13 @@ class Machine(threaded, simplified_client_socket):
 		if not 'display' in kwargs: kwargs['display'] = None # = '-nographic'
 		self.setName(kwargs['name'])
 
+		if type(kwargs['harddrives']) in (int, float):
+			harddrives = []
+			for index in range(kwargs['harddrives']):
+				hdd = Harddrive(filename=f'test{index}.qcow2')
+				hdd.up()
+				harddrives.append(hdd)
+			kwargs['harddrives'] = harddrives
 		if type(kwargs['harddrives']) != list: kwargs['harddrives'] = [kwargs['harddrives']]
 		if type(kwargs['nics']) in (int, float):
 			# Non specific nics given, just the ammount that we want
