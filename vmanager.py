@@ -746,7 +746,7 @@ class Machine(threaded, simplified_client_socket):
 		if not 'efi' in kwargs: kwargs['efi'] = True
 		if not 'monitor_port' in kwargs: kwargs['monitor_port'] = 4000
 
-		machines[name] = self
+		machines[kwargs['name']] = self
 
 		if not 'display' in kwargs: kwargs['display'] = None # = '-nographic'
 		self.setName(kwargs['name'])
