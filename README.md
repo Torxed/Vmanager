@@ -24,7 +24,7 @@ This documentation will be moved to readthedocs or something.
 | <strike>vmanager.Bond()</strike>  | <strike>Used to aggregate multiple NIC's into one logical interface</strike> *(TODO)* |
 | vmanager.Switch  | Creates a virtual switch *(Currently creates a bridge where other interfaces can be slaved to, in order to emulate a "switch")*  |
 | vmanager.Router  | Creates a router *(bridge)* interface with one trunk interface and one LAN port. Used to tie together physical interfaces to the virtual realm and give machines access to the outside world.  |
-| vmanager.VirtualNic  | Creates a virtual `VETH` interface with a `port<--->sink` setup. If `namespace=<name>` is given, the `sink` end of the pipe is moved into a namespace, and is given a `macvtap` interface that can be used to give to a virtual machine to enable layer2 traffic.  |
+| vmanager.VirtualNic  | Creates a virtual `VETH` interface with a `port<--->sink` setup. If `namespace=<name>` is given, the `sink` end of the pipe is moved into a namespace, and is given a `macvtap` interface that can be used to give to a virtual machine to enable layer2 traffic. Functions such as `.up()` and `.down()` are available to bring the interface pair's up/down. |
 | vmanager.CD  | A wrapper around ISO's, virtual machines uses `cd.qemu_string` wrapper to get the string representation to give a VM a CD that's useable  |
 | vmanager.Harddrive  | Same as `CD`, but supports `.snapshots`, `.create`, `.wipe([snapshots_only=False])` and <strike>`.resize`</strike> as well as `.qemu_string`.  |
 | vmanager.Machine  | The main class really, it sets up a KVM enabled machine that can use NIC's, HDD's, CD's and other stuff. Use `.send()` to talk to the QEMU console, for instance `.send(b'ctrl-alt-f2')` switches to TTY2 on a Unix machine. Full documentation on the different functions can be found below in a separate table for `Machine`  |
@@ -38,7 +38,7 @@ This is a work in process library, many of the features are yet not implemented.
 | vmanager.Machine()  | `harddrives=` takes `Harddrive` as a object or a list of objects. `nics` same thing, but takes `int` to define how many interfaces or a list of `VirtualNic`'s, `cd` takes one `CD` as argument. `memory` takes a `int` representing MB in size of RAM allocated. `monitor_port` will be the TCP port that `qemu` will listen to in order for you to connect (This automatically happens when setting up the `Machine()` instance. But you can use it to define a pre-defined port.)  |
 | <strike>Machine.is_alive</strike>  | Returns weither or not the machine is running.  |
 | Machine.start_vm  | Starts the VM *(grabs `qemu_string` from attached resources.)*  |
-| <strike>Machine.stop</strike>  | Stops the VM forcefully. |
+| Machine.stop  | Stops the VM forcefully. |
 | <strike>Machine.freeze</strike>  | Freezes the VM (useful for snapshotting etc)  |
 | <strike>Machine.unfreeze</strike>  | Unfreezes the VM  |
 | Machine.snapshot  | Snapshots the machine and it's harddrives.  |
@@ -55,7 +55,8 @@ This is a work in process library, many of the features are yet not implemented.
 | <strike>Machine.mouse_click</strike>  | Clicks `button=1` where the mouse cursor currently is in the machine.  |
 | <strike>Machine.add_nic</strike>  | Add another NIC, if the guest supports it, it's hot swapped in.  |
 | <strike>Machine.del_nic</strike>  | Removes a NIC.  |
-| <strike>Machine.screenshot</strike>  | Takes a screendump of the machine and stores it in `filename=<full path>`  |
+| Machine.delete  | Deletes the machine and all it's associated NIC's and namespaces.  |
+| Machine.screenshot  | Takes a screendump of the machine and stores it in `filename=<full path>`  |
 | <strike>Machine.send_key</strike>  | Sends a key combination to the QEMU console, which sends it into the machine. `send_key("ctrl-alt-del")` for instance.  |
 | <strike>Machine.nic_state</strike>  | Turns the NIC on or off in the QEMU instance, doesn't affect physical link states on the host. If you want to change physical states, do `vmanager.interfaces["name"].down()` for instance. |
 
