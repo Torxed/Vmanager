@@ -941,7 +941,7 @@ if __name__ == '__main__':
 				machine.screenshot()
 			elif b'screendump ' in qemu_output:
 				print('[N] Sending quit to the machine.')
-				machine.send('quit\n')
+				machine.stop()
 		time.sleep(1)
 
 	print('Machine has terminated.')
