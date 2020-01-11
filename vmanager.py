@@ -29,6 +29,11 @@ interfaces = {}
 gateways = {}
 routes = {}
 
+machines = {}
+nics = {}
+harddrives = {}
+cds = {}
+
 tmp_mapper = {} # Maps IP -> Interface
 
 def update_interface_cache():
@@ -528,6 +533,8 @@ class VirtualNic():
 			if 'namespace' in kwargs and kwargs['namespace']:
 				self.set_namespace(kwargs['namespace'])
 
+		nics[self.ports['source_name']] = self
+
 	def __repr__(self, *args, **kwargs):
 		sink_repr = self.ports["sink_name"]
 		if self.namespace: sink_repr += '@'+self.namespace
@@ -633,6 +640,8 @@ class CD():
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
 
+		cds[self.filename] = self
+
 	def __repr__(self, *args, **kwargs):
 		return f'CD({os.path.basename(self.filename)})'
 
@@ -665,6 +674,8 @@ class Harddrive():
 		if not os.path.isfile(self.filename):
 			if not self.create(**kwargs):
 				raise ValueError(f'Could not create virtual harddrive image: {self.filename}')
+
+		harddrives[kwargs['filename']] = self
 
 	def __repr__(self, *args, **kwargs):
 		return f'HDD({os.path.basename(self.filename)})'
@@ -734,6 +745,8 @@ class Machine(threaded, simplified_client_socket):
 		if not 'memory' in kwargs: kwargs['memory'] = 4096
 		if not 'efi' in kwargs: kwargs['efi'] = True
 		if not 'monitor_port' in kwargs: kwargs['monitor_port'] = 4000
+
+		machines[name] = self
 
 		if not 'display' in kwargs: kwargs['display'] = None # = '-nographic'
 		self.setName(kwargs['name'])
