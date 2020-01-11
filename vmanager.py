@@ -755,7 +755,6 @@ class Machine(threaded, simplified_client_socket):
 			harddrives = []
 			for index in range(kwargs['harddrives']):
 				hdd = Harddrive(filename=f'test{index}.qcow2')
-				hdd.up()
 				harddrives.append(hdd)
 			kwargs['harddrives'] = harddrives
 		if type(kwargs['harddrives']) != list: kwargs['harddrives'] = [kwargs['harddrives']]
