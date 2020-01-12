@@ -789,7 +789,7 @@ class Machine(threaded, simplified_client_socket):
 		return f'Machine(name={self.name}, cd={self.cd}, hdd\'s={self.harddrives}, nics={self.nics} monitor=/tmp/{self.name}_socket)'
 
 	def is_alive(self, *args, **kwargs):
-		pass
+		return self.exit_code is None
 
 	def delete(self, *args, **kwargs):
 		self.stop()
