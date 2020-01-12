@@ -789,7 +789,7 @@ class Machine(threaded, simplified_client_socket):
 		return f'Machine(name={self.name}, cd={self.cd}, hdd\'s={self.harddrives}, nics={self.nics} monitor=/tmp/{self.name}_socket)'
 
 	def is_alive(self, *args, **kwargs):
-		return self.exit_code is None
+		return self.exit_code is None or self.exit_code = -1
 
 	def delete(self, *args, **kwargs):
 		self.stop_vm()
@@ -798,6 +798,7 @@ class Machine(threaded, simplified_client_socket):
 		netns.remove(self.namespace)
 
 	def start_vm(self, *args, **kwargs):
+		self.exit_code = -1
 		params = '-enable-kvm'
 		params += ' -machine q35,accel=kvm'
 		params += ' -device intel-iommu'
