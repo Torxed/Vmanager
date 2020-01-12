@@ -834,6 +834,7 @@ class Machine(threaded, simplified_client_socket):
 		return self.exit_code is None or self.alive
 
 	def stop_vm(self, *args, **kwargs):
+		self.exit_code = -1
 		self.send(b'quit\n') # see below
 		# qemu: stop / system_powerdown
 
