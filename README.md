@@ -36,9 +36,9 @@ This is a work in process library, many of the features are yet not implemented.
 | Functions  | Description |
 | ------------- | ------------- |
 | vmanager.Machine()  | `harddrives=` takes `Harddrive` as a object or a list of objects. `nics` same thing, but takes `int` to define how many interfaces or a list of `VirtualNic`'s, `cd` takes one `CD` as argument. `memory` takes a `int` representing MB in size of RAM allocated. `monitor_port` will be the TCP port that `qemu` will listen to in order for you to connect (This automatically happens when setting up the `Machine()` instance. But you can use it to define a pre-defined port.)  |
-| <strike>Machine.is_alive</strike>  | Returns weither or not the machine is running.  |
+| Machine.is_running  | Returns weither or not the machine is running.  |
 | Machine.start_vm  | Starts the VM *(grabs `qemu_string` from attached resources.)*  |
-| Machine.stop  | Stops the VM forcefully. |
+| Machine.stop_vm  | Stops the VM forcefully. |
 | <strike>Machine.freeze</strike>  | Freezes the VM (useful for snapshotting etc)  |
 | <strike>Machine.unfreeze</strike>  | Unfreezes the VM  |
 | Machine.snapshot  | Snapshots the machine and it's harddrives.  |
