@@ -187,6 +187,7 @@ class threaded(Thread):
 		self.worker_id = kwargs['worker_id']
 		self.trace_log = b''
 		self.status = 'starting'
+		self.alive = None
 
 		self.callback = callback
 		self.start_callback = start_callback
@@ -788,9 +789,6 @@ class Machine(threaded, simplified_client_socket):
 	def __repr__(self, *args, **kwargs):
 		return f'Machine(name={self.name}, cd={self.cd}, hdd\'s={self.harddrives}, nics={self.nics} monitor=/tmp/{self.name}_socket)'
 
-	def is_alive(self, *args, **kwargs):
-		return self.exit_code is None or self.exit_code == -1
-
 	def delete(self, *args, **kwargs):
 		self.stop_vm()
 		for nic in self.nics:
@@ -833,7 +831,7 @@ class Machine(threaded, simplified_client_socket):
 			nic.up()
 
 	def is_running(self, *args, **kwargs):
-		return self.alive
+		return self.exit_code != -1 and self.exit_code is None
 
 	def stop_vm(self, *args, **kwargs):
 		self.send(b'quit\n') # see below
@@ -957,7 +955,7 @@ if __name__ == '__main__':
 
 	machine.start_vm()
 
-	while machine.is_alive() or machine.exit_code is None:
+	while machine.is_alive():
 		qemu_output = machine.recv()
 		if qemu_output:
 #			print(qemu_output.decode('UTF-8'))
