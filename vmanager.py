@@ -534,6 +534,7 @@ class VirtualNic():
 				self.set_namespace(kwargs['namespace'])
 
 		nics[self.ports['source_name']] = self
+		self.state = False
 
 	def __repr__(self, *args, **kwargs):
 		sink_repr = self.ports["sink_name"]
@@ -546,6 +547,7 @@ class VirtualNic():
 
 	def up(self, *args, **kwargs):
 		print(f'[N] VNic() up on {self}')
+		self.state = True
 		with IPRoute() as ip:
 			ip.link('set', index=self.ports['source'], state='up')
 			if not self.namespace:
@@ -555,6 +557,7 @@ class VirtualNic():
 
 	def down(self, *args, **kwargs):
 		print(f'[N] VNic() down on {self}')
+		self.state = False
 		with IPRoute() as ip:
 			ip.link('set', index=self.ports['source'], state='down')
 			if not self.namespace:
