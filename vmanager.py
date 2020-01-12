@@ -181,7 +181,7 @@ class threaded(Thread):
 		self.args = args
 		self.kwargs = kwargs
 		self.pid = None
-		self.exit_code = None
+		self.exit_code = -1
 		self.started = time.time()
 		self.ended = None
 		self.worker_id = kwargs['worker_id']
@@ -796,6 +796,7 @@ class Machine(threaded, simplified_client_socket):
 
 	def start_vm(self, *args, **kwargs):
 		self.exit_code = -1
+		self.alive = None
 		params = '-enable-kvm'
 		params += ' -machine q35,accel=kvm'
 		params += ' -device intel-iommu'
