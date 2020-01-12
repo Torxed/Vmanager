@@ -768,6 +768,9 @@ class Machine(threaded, simplified_client_socket):
 			kwargs['nics'] = nics
 		if type(kwargs['nics']) != list: kwargs['nics'] = [kwargs['nics']]
 
+		if kwargs['cd'] and type(kwargs['cd']) != CD and os.path.isfile(kwargs['cd']):
+			kwargs['cd'] = CD(kwargs['cd'])
+
 		for nic in kwargs['nics']:
 			if not nic.namespace == kwargs['namespace']:
 				nic.set_namespace(kwargs['namespace'])
