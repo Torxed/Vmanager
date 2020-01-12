@@ -181,7 +181,7 @@ class threaded(Thread):
 		self.args = args
 		self.kwargs = kwargs
 		self.pid = None
-		self.exit_code = -1
+		self.exit_code = None
 		self.started = time.time()
 		self.ended = None
 		self.worker_id = kwargs['worker_id']
@@ -197,6 +197,7 @@ class threaded(Thread):
 		self.cmd = None
 
 	def start_thread(self, cmd, *args, **kwargs):
+		self.alive = True
 		self.raw_cmd = cmd
 		self.start()
 
@@ -831,7 +832,7 @@ class Machine(threaded, simplified_client_socket):
 			nic.up()
 
 	def is_running(self, *args, **kwargs):
-		return self.exit_code is None
+		return self.exit_code is None or self.alive
 
 	def stop_vm(self, *args, **kwargs):
 		self.send(b'quit\n') # see below
