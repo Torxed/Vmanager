@@ -783,8 +783,6 @@ class Machine(threaded, simplified_client_socket):
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
 
-		self.alive = True
-
 		simplified_client_socket.__init__(self, f'/tmp/{kwargs["name"]}_socket')
 
 	def __repr__(self, *args, **kwargs):
