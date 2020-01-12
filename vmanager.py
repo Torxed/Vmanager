@@ -792,7 +792,7 @@ class Machine(threaded, simplified_client_socket):
 		return self.exit_code is None
 
 	def delete(self, *args, **kwargs):
-		self.stop()
+		self.stop_vm()
 		for nic in self.nics:
 			nic.delete()
 		netns.remove(self.namespace)
@@ -834,7 +834,7 @@ class Machine(threaded, simplified_client_socket):
 	def is_running(self, *args, **kwargs):
 		return self.alive
 
-	def stop(self, *args, **kwargs):
+	def stop_vm(self, *args, **kwargs):
 		self.send(b'quit\n') # see below
 		# qemu: stop / system_powerdown
 
@@ -966,7 +966,7 @@ if __name__ == '__main__':
 				machine.screenshot()
 			elif b'screendump ' in qemu_output:
 				print('[N] Sending quit to the machine.')
-				machine.stop()
+				machine.stop_vm()
 		time.sleep(1)
 
 	print('Machine has terminated.')
