@@ -336,11 +336,13 @@ class Interface():
 		print(f'[N] Interface() up on {self}')
 		with IPRoute() as ip:
 			ip.link("set", index=self.index, state="up")
+		self.state = 'up'
 
 	def down(self, *args, **kwargs):
 		print(f'[N] Interface() down on {self}')
 		with IPRoute() as ip:
 			ip.link("set", index=self.index, state="down")
+		self.state = 'down'
 
 	def master(self, ifname, *args, **kwargs):
 		print(f'[N] Interface() setting master on {self} to {ifname}')
@@ -378,6 +380,16 @@ class Interface():
 	def __repr__(self, *args, **kwargs):
 		addresses = ', '.join(sorted(['/'.join([str(i) for i in x]) for x in list(self.ip)]))
 		return f"{self.ifname}@[state='{self['state']}', ip=({addresses})]"
+
+	def __dump__(self, *args, **kwargs):
+		return {
+			'ip' : self._ip,
+			'mac' : self.mac,
+			'state' : self.state,
+			'gateway' : self.gateway,
+			'routes' : self.routes,
+			'connected_to' : self.connected_to
+		}
 
 class Bond():
 	""" Not 007, but close. It's a aggregated NIC with multiple outputs.
@@ -765,12 +777,12 @@ class Machine(threaded, simplified_client_socket):
 		if type(kwargs['harddrives']) != list: kwargs['harddrives'] = [kwargs['harddrives']]
 		if type(kwargs['nics']) in (int, float):
 			# Non specific nics given, just the ammount that we want
-			nics = []
+			machine_nics = []
 			for index in range(kwargs['nics']):
 				nic = VirtualNic(f"{kwargs['name']}-p{index}", f"{kwargs['name']}-sink{index}", namespace=kwargs['namespace'])
 				nic.up()
-				nics.append(nic)
-			kwargs['nics'] = nics
+				machine_nics.append(nic)
+			kwargs['nics'] = machine_nics
 		if type(kwargs['nics']) != list: kwargs['nics'] = [kwargs['nics']]
 
 		if kwargs['cd'] and type(kwargs['cd']) != CD and os.path.isfile(kwargs['cd']):
