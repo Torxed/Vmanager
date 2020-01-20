@@ -31,6 +31,8 @@ routes = {}
 
 machines = {}
 nics = {}
+routers = {}
+switches = {}
 harddrives = {}
 cds = {}
 
@@ -117,6 +119,21 @@ def sys_command(cmd, opts=None, *args, **kwargs):
 	handle.stdin.close()
 	handle.stdout.close()
 	return output
+
+def generate_mac():
+	# https://serverfault.com/a/40720/150015
+
+	prefix = 254 # FE
+	version = 1
+
+	random1 = randint(0, 255)
+	random2 = randint(0, 255)
+	random3 = randint(0, 255)
+	random4 = randint(0, 255)
+
+	mac = ':'.join([hex(x)[2:].zfill(2) for x in [prefix, version, random1, random2, random3, random4]])
+	print('Generated new mac:', mac)
+	return mac
 
 class simplified_client_socket():
 	def __init__(self, target, *args, **kwargs):
@@ -407,7 +424,25 @@ class Switch():
 	def __init__(self, ifname=None, *args, **kwargs):
 		if 'name' in kwargs: ifname = kwargs['name']
 		if 'interface' in kwargs: ifname = kwargs['interface']
-		if not ifname: ifname = 'switch0'
+		if not 'ip' in kwargs: kwargs['ip'] = None
+		if not 'mac' in kwargs: kwargs['mac'] = generate_mac()
+		if not 'state' in kwargs: kwargs['state'] = 'up'
+		if not ifname:
+			index = 0
+			ifname = f'switch{index}'
+			with IPRoute() as ip:
+				while ip.link_lookup(ifname=ifname):
+					index += 1
+					ifname = f'switch{index}'
+		else:
+			with IPRoute() as ip:
+				index = ip.link_lookup(ifname=ifname)
+				if index:
+					print(f'[N] Switch {ifname} already exists, wrapping it.')
+					print('TODO: Get the connections (master/slave) of the switch.')
+
+		for key, val in kwargs.items():
+			self.__dict__[key] = val
 
 		self.ifname = ifname
 		self.connections = {}
@@ -418,7 +453,7 @@ class Switch():
 		with IPRoute() as ip:
 			switch_lookup = ip.link_lookup(ifname=ifname)
 			if not switch_lookup:
-				ip.link('add', ifname=ifname, kind='bridge')
+				ip.link('add', ifname=ifname, kind='bridge', address=kwargs['mac'])
 				switch_lookup = ip.link_lookup(ifname=ifname)
 			self.index = switch_lookup[0]
 
@@ -429,6 +464,15 @@ class Switch():
 				self.connections[interface] = True
 
 			ip.link('set', index=self.index, state='up')
+
+		switches[self.ifname] = {
+			'ip' : self.ip,
+			'mac' : self.mac, # / ipdb['address']
+			'state' : self.state,
+			'gateway' : None,
+			'routes' : [],
+			'connected_to' : []
+		}
 
 	def connect(self, what, *args, **kwargs):
 		print(f'[N] {self} is enslaving {what}.')
@@ -454,15 +498,34 @@ class Router():
 		if 'of' in kwargs: kwargs['trunk'] = kwargs['of']
 		if 'output' in kwargs: kwargs['trunk'] = kwargs['output']
 		# ----
+		if not 'mac' in kwargs: kwargs['mac'] = generate_mac()
+		if not 'ip' in kwargs: kwargs['ip'] = None
+		if not 'state' in kwargs: kwargs['state'] = 'up'
 		if not 'trunk' in kwargs:
 			if len(args) and args[0]:
 				kwargs['trunk'] = args[0]
 			else:
 				raise KeyError('Router() needs a trunk interface.')
-		if not 'ifname' in kwargs: kwargs['ifname'] = 'router0'
-		if not 'input' in kwargs: kwargs['input'] = None
 
-		print(f'[N] Router() is using "{kwargs["trunk"]}" as trunk')
+		if not 'ifname' in kwargs:
+			index = 0
+			ifname = f'router{index}'
+			with IPRoute() as ip:
+				while ip.link_lookup(ifname=ifname):
+					index += 1
+					ifname = f'router{index}'
+			kwargs['ifname'] = ifname
+		else:
+			with IPRoute() as ip:
+				index = ip.link_lookup(ifname=kwargs["ifname"])
+				if index:
+					print(f'[N] Router {kwargs["ifname"]} already exists, wrapping it.')
+					print('TODO: Get the connections (master/slave) of the router.')
+		if not 'input' in kwargs: kwargs['input'] = None
+		for key, val in kwargs.items():
+			self.__dict__[key] = val
+
+		print(f'[N] Router() is using "{self.trunk}" as trunk')
 
 		with IPRoute() as ip:
 			trunk = ip.link_lookup(ifname=kwargs['trunk'])
@@ -475,24 +538,38 @@ class Router():
 
 			bridge_lookup = ip.link_lookup(ifname=kwargs['ifname'])
 			if not bridge_lookup:
-				ip.link('add', ifname=kwargs['ifname'], kind='bridge')
+				ip.link('add', ifname=kwargs['ifname'], kind='bridge', address=self.mac)
 				self.index = ip.link_lookup(ifname=kwargs['ifname'])[0]
 			else:
 				self.index = bridge_lookup[0]
 
 			if kwargs['input'] is None:
-				kwargs['input'] = VirtualNic(f'{kwargs["ifname"]}-p0', f'{kwargs["ifname"]}-sink0', namespace=False)
+				kwargs['input'] = VirtualNic(f'{kwargs["ifname"]}-p0', sink=f'{kwargs["ifname"]}-sink0', namespace=False)
 
 			print(f'[N] Router() is enslaving {kwargs["trunk"]} and {kwargs["ifname"]}-sink0')
 
+			print(kwargs['input'].ports)
 			ip.link("set", index=self.trunk_index, master=self.index) # Slave trunk to this router (bridge)
 			ip.link("set", index=kwargs['input'].ports['sink'], master=self.index) # Slave the routers port-0 sink to this router
 
 			kwargs['input'].up()
 			ip.link('set', index=self.index, state='up')
 
-		for key, val in kwargs.items():
-			self.__dict__[key] = val
+			interface = ip.get_addr(index=self.trunk_index)
+			if interface:
+				#print(interface[0])
+				#print('Trunk IP:', interface[0].get_attr('IFA_ADDRESS'))
+				ip.flush_addr(self.trunk_index)
+				sys_command(f'dhclient -v {kwargs["ifname"]}')
+
+		routers[self.ifname] = {
+			'ip' : self.ip,
+			'mac' : self.mac, # / ipdb['address']
+			'state' : self.state,
+			'gateway' : kwargs['trunk'],
+			'routes' : [],
+			'connected_to' : kwargs['input'].ports['sink_name']
+		}
 
 	def delete(self, *args, **kwargs):
 		self.input.delete()
@@ -520,28 +597,39 @@ class NetworkNameSpace():
 		pass
 
 class VirtualNic():
-	def __init__(self, source, sink, *args, **kwargs):
+	def __init__(self, source, *args, **kwargs):
+		if not 'sink' in kwargs: kwargs['sink'] = f'{source}-sink'
 		if not 'namespace' in kwargs: kwargs['namespace'] = None
-		if not 'mac' in kwargs: kwargs['mac'] = '02:d6:c0:2c:ab:a1'
+		if not 'mac' in kwargs: kwargs['mac'] = generate_mac()
+		if not 'sink_mac' in kwargs: kwargs['sink_mac'] = generate_mac()
+		if not 'ip' in kwargs: kwargs['ip'] = None
+		if not 'state' in kwargs: kwargs['state'] = 'down'
+		if not 'gateway' in kwargs: kwargs['gateway'] = None
+		if not 'routes' in kwargs: kwargs['routes'] = [],
+		if not 'connected_to' in kwargs: kwargs['connected_to'] = []
+
+		print(f'[N] Setting up VNic({source} <--> {kwargs["sink"]})')
+
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
 
 		with IPRoute() as ip:
 			try:
-				ip.link('add', ifname=source, kind='veth', peer=sink)
+				ip.link('add', ifname=source, kind='veth', peer=self.sink, address=self.mac)
+				source_index = ip.link_lookup(ifname=source)[0]
+				sink_index = ip.link_lookup(ifname=self.sink)[0]
+				ip.link('set', index=sink_index, address=self.sink_mac)
 			except netlink.exceptions.NetlinkError:
 				print(f'[N] {source} and {sink} already exists, wrapping them.')
+				source_index = ip.link_lookup(ifname=source)[0]
+				sink_index = ip.link_lookup(ifname=self.sink)[0]
 
 		with IPRoute() as ip:
-			sink_index = ip.link_lookup(ifname=sink)
-			if sink_index: sink_index = sink_index[0]
-			else: sink_index = None
-
 			self.ports = {
-				'source' : ip.link_lookup(ifname=source)[0],
+				'source' : source_index,
 				'source_name' : source,
 				'sink' : sink_index,
-				'sink_name' : sink
+				'sink_name' : kwargs['sink']
 			}
 
 			if 'namespace' in kwargs and kwargs['namespace']:
@@ -779,7 +867,7 @@ class Machine(threaded, simplified_client_socket):
 			# Non specific nics given, just the ammount that we want
 			machine_nics = []
 			for index in range(kwargs['nics']):
-				nic = VirtualNic(f"{kwargs['name']}-p{index}", f"{kwargs['name']}-sink{index}", namespace=kwargs['namespace'])
+				nic = VirtualNic(f"{kwargs['name']}-p{index}", sink=f"{kwargs['name']}-sink{index}", namespace=kwargs['namespace'])
 				nic.up()
 				machine_nics.append(nic)
 			kwargs['nics'] = machine_nics
