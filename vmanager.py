@@ -63,7 +63,26 @@ def update_interface_cache():
 					}
 				}
 
-				interfaces[ifname] = Interface(ifname=ifname, **interfaces[ifname])
+				if interfaces[ifname]['mac'][:5] == 'fe:01':
+					_type = interfaces[ifname]['mac'].split(':')[2]
+					print(ifname, _type)
+					if _type == '00':
+						print(ifname, 'is a switch')
+						switches[ifname] = Switch(ifname=ifname, **interfaces[ifname])
+					elif _type == '01':
+						print(ifname, 'is a router')
+						routers[ifname] = Router(ifname=ifname, **interfaces[ifname])
+					#elif _type == '02':
+					#	interfaces[ifname] = Bridge(ifname=ifname, **interfaces[ifname])
+					elif _type == '03':
+						interfaces[ifname] = None # This is a sink to another network interface
+					else:
+						print(ifname, 'is a Vnic')
+						nics[ifname] = VirtualNic(ifname=ifname, **interfaces[ifname])
+					
+					del(interfaces[ifname])
+				else:
+					interfaces[ifname] = Interface(ifname=ifname, **interfaces[ifname])
 				
 				for ip_addr in ipdb.by_name[ifname]['ipaddr']:
 					tmp_mapper[ip_addr[0]] = ifname
@@ -120,18 +139,27 @@ def sys_command(cmd, opts=None, *args, **kwargs):
 	handle.stdout.close()
 	return output
 
-def generate_mac():
+def generate_mac(*args, **kwargs):
+	if not 'device' in kwargs: kwargs['device'] = None
 	# https://serverfault.com/a/40720/150015
 
 	prefix = 254 # FE
 	version = 1
-
+	if kwargs['device'] and kwargs['device'] == 'switch':
+		kwargs['device'] = 0
+	elif kwargs['device'] and kwargs['device'] == 'router':
+		kwargs['device'] = 1
+	elif kwargs['device'] and kwargs['device'] == 'bridge':
+		kwargs['device'] = 2
+	elif kwargs['device'] and kwargs['device'] == 'sink':
+		kwargs['device'] = 3
+	else:
+		kwargs['device'] = randint(10, 255)
 	random1 = randint(0, 255)
 	random2 = randint(0, 255)
 	random3 = randint(0, 255)
-	random4 = randint(0, 255)
 
-	mac = ':'.join([hex(x)[2:].zfill(2) for x in [prefix, version, random1, random2, random3, random4]])
+	mac = ':'.join([hex(x)[2:].zfill(2) for x in [prefix, version, kwargs['device'], random1, random2, random3]])
 	print('Generated new mac:', mac)
 	return mac
 
@@ -340,6 +368,7 @@ class Interface():
 		if not 'gateway' in kwargs: kwargs['gateway'] = None
 		if not 'connected_to' in kwargs: kwargs['connected_to'] = []
 		if not 'ifname' in kwargs: raise KeyError('Interface() needs a ifname.')
+
 		for key, val in kwargs.items():
 			if key == 'ip': continue # Sets up later
 			self.__dict__[key] = val
@@ -425,7 +454,7 @@ class Switch():
 		if 'name' in kwargs: ifname = kwargs['name']
 		if 'interface' in kwargs: ifname = kwargs['interface']
 		if not 'ip' in kwargs: kwargs['ip'] = None
-		if not 'mac' in kwargs: kwargs['mac'] = generate_mac()
+		if not 'mac' in kwargs: kwargs['mac'] = generate_mac(*args, **{'device' : 'switch', **kwargs})
 		if not 'state' in kwargs: kwargs['state'] = 'up'
 		if not ifname:
 			index = 0
@@ -498,7 +527,7 @@ class Router():
 		if 'of' in kwargs: kwargs['trunk'] = kwargs['of']
 		if 'output' in kwargs: kwargs['trunk'] = kwargs['output']
 		# ----
-		if not 'mac' in kwargs: kwargs['mac'] = generate_mac()
+		if not 'mac' in kwargs: kwargs['mac'] = generate_mac(*args, **{'device' : 'router', **kwargs})
 		if not 'ip' in kwargs: kwargs['ip'] = None
 		if not 'state' in kwargs: kwargs['state'] = 'up'
 		if not 'trunk' in kwargs:
@@ -597,13 +626,14 @@ class NetworkNameSpace():
 		pass
 
 class VirtualNic():
-	def __init__(self, source, *args, **kwargs):
+	def __init__(self, source=None, *args, **kwargs):
+		if not source and 'ifname' in kwargs: source=kwargs['ifname']
 		if not 'sink' in kwargs: kwargs['sink'] = f'{source}-sink'
 		if not 'namespace' in kwargs: kwargs['namespace'] = None
-		if not 'mac' in kwargs: kwargs['mac'] = generate_mac()
-		if not 'sink_mac' in kwargs: kwargs['sink_mac'] = generate_mac()
+		if not 'mac' in kwargs: kwargs['mac'] = generate_mac(*args, **{'device' : 'vnic', **kwargs})
+		if not 'sink_mac' in kwargs: kwargs['sink_mac'] = generate_mac(*args, **{'device' : 'sink', **kwargs})
 		if not 'ip' in kwargs: kwargs['ip'] = None
-		if not 'state' in kwargs: kwargs['state'] = 'down'
+		if not 'state' in kwargs: kwargs['state'] = 'Unknown'
 		if not 'gateway' in kwargs: kwargs['gateway'] = None
 		if not 'routes' in kwargs: kwargs['routes'] = [],
 		if not 'connected_to' in kwargs: kwargs['connected_to'] = []
@@ -620,7 +650,7 @@ class VirtualNic():
 				sink_index = ip.link_lookup(ifname=self.sink)[0]
 				ip.link('set', index=sink_index, address=self.sink_mac)
 			except netlink.exceptions.NetlinkError:
-				print(f'[N] {source} and {sink} already exists, wrapping them.')
+				print(f'[N] {source} and {self.sink} already exists, wrapping them.')
 				source_index = ip.link_lookup(ifname=source)[0]
 				sink_index = ip.link_lookup(ifname=self.sink)[0]
 
@@ -636,7 +666,21 @@ class VirtualNic():
 				self.set_namespace(kwargs['namespace'])
 
 		nics[self.ports['source_name']] = self
-		self.state = False
+		nics[self.ports['sink_name']] = self
+
+	def __getitem__(self, key, *args, **kwargs):
+		if key == 'ip': return iter(self.ip)
+		return self.__dict__[key]
+
+	def __setitem__(self, key, val, *args, **kwargs):
+		self.__dict__[key] = val
+
+	def __delitem__(self, key, *args, **kwargs):
+		del(self.__dict__[key])
+
+	def __iter__(self, *args, **kwargs):
+		for item in self.__dict__:
+			yield item
 
 	def __repr__(self, *args, **kwargs):
 		sink_repr = self.ports["sink_name"]
