@@ -491,12 +491,14 @@ class Interface():
 		if not 'ifname' in kwargs: raise KeyError('Interface() needs a ifname.')
 		if kwargs['ip'] is None: kwargs['ip'] = []
 
+		if not 'index' in kwargs:
+			with IPRoute() as ip:
+				kwargs['index'] = ip.link_lookup(ifname=kwargs['ifname'])[0]
+
 		for key, val in kwargs.items():
 			if key == 'ip': continue # Sets up later
 			self.__dict__[key] = val
 
-		with IPRoute() as ip:
-			self.index = ip.link_lookup(ifname=kwargs['ifname'])[0]
 
 		self._ip = kwargs['ip']
 
@@ -763,7 +765,7 @@ class Router():
 			if kwargs['input'] is None:
 				kwargs['input'] = VirtualNic(ifname=f'{kwargs["ifname"]}-p0', sink=f'{kwargs["ifname"]}-p0-sink', namespace=False)
 
-			print(f'[N] Router() is enslaving {kwargs["trunk"]} and {kwargs["ifname"]}-sink0')
+			print(f'[N] Router() is enslaving {kwargs["trunk"]} and {kwargs["ifname"]}-p0-sink')
 
 			print(kwargs['input'].ports)
 			ip.link("set", index=self.trunk_index, master=self.index) # Slave trunk to this router (bridge)
@@ -839,6 +841,7 @@ class NetworkNameSpace():
 class VirtualNic():
 	def __init__(self, source=None, *args, **kwargs):
 		if not source and 'ifname' in kwargs: source=kwargs['ifname']
+		if not 'ifname' in kwargs and source: kwargs['ifname'] = source
 		if not 'sink' in kwargs: kwargs['sink'] = f'{source}-sink'
 		if not 'namespace' in kwargs: kwargs['namespace'] = None
 		if not 'mac' in kwargs: kwargs['mac'] = generate_mac(*args, **{'device' : 'vnic', **kwargs})
@@ -864,7 +867,16 @@ class VirtualNic():
 				print(f'[N] {source} and {self.sink} already exists, wrapping them. ({e})')
 				source_index = ip.link_lookup(ifname=source)[0]
 				print(self.sink)
-				sink_index = ip.link_lookup(ifname=self.sink)[0]
+				sink_index = ip.link_lookup(ifname=self.sink)
+				if not sink_index:
+					print('Sink in namespace already?')
+					o = json.loads(sys_command('ip netns exec test ip -j link').decode('UTF-8'))
+					for iface_info in o:
+						print(iface_info['ifname'], self.sink)
+						if iface_info['ifname'] == self.sink:
+							sink_index = iface_info['ifindex'] #link_index? address == mac
+							break
+				print(sink_index)
 
 		with IPRoute() as ip:
 			self.ports = {
@@ -898,7 +910,8 @@ class VirtualNic():
 													ip=self.ip,
 													state=self.state,
 													routes=self.routes,
-													gateway=self.ports['source_name'])
+													gateway=self.ports['source_name'],
+													index=sink_index)
 
 		if 'namespace' in kwargs and kwargs['namespace']:
 			self.set_namespace(kwargs['namespace'])
@@ -921,6 +934,17 @@ class VirtualNic():
 		sink_repr = self.ports["sink_name"]
 		if self.namespace: sink_repr += '@'+self.namespace
 		return f'VNic("{self.ports["source_name"]} <--> {sink_repr}")'
+
+	def __dump__(self, *args, **kwargs):
+		return {
+			'ifname' : self.ifname,
+			'ip' : self.ip,
+			'mac' : self.mac,
+			'state' : self.state,
+			'gateway' : self.gateway,
+			'routes' : self.routes,
+			'connected_to' : self.connected_to
+		}
 
 	def delete(self, *args, **kwargs):
 		with IPRoute() as ip:
@@ -1189,7 +1213,7 @@ class Machine(threaded, simplified_client_socket):
 			# Non specific nics given, just the ammount that we want
 			machine_nics = []
 			for index in range(kwargs['nics']):
-				nic = VirtualNic(ifname=f"{kwargs['name']}-p{index}", sink=f"{kwargs['name']}-sink{index}", namespace=kwargs['namespace'])
+				nic = VirtualNic(ifname=f"{kwargs['name']}-p{index}", sink=f"{kwargs['name']}-p{index}-sink", namespace=kwargs['namespace'])
 				nic.up()
 				machine_nics.append(nic)
 			kwargs['nics'] = machine_nics
