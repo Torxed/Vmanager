@@ -534,14 +534,14 @@ class Interface():
 	def connect(self, what, target=None, *args, **kwargs):
 		print(f'{self} is connecting {what} [{target}]')
 		if type(what) == str:
-			if what in vmanager.nics:
-				what = vmanager.nics[what]
-			elif what in vmanager.interfaces:
-				what = vmanager.interfaces[what]
-			elif what in vmanager.routers:
-				what = vmanager.routers[what]
-			elif what in vmanager.switches:
-				what = vmanager.switches[what]
+			if what in nics:
+				what = nics[what]
+			elif what in interfaces:
+				what = interfaces[what]
+			elif what in routers:
+				what = routers[what]
+			elif what in switches:
+				what = switches[what]
 			else:
 				print(f'[!] Can not connect {what} to {target}, {what} does not exist.')
 
@@ -561,7 +561,7 @@ class Interface():
 			ip.link("set", index=what_index, master=self.index)
 		else:
 			print(f'[N] {self} is connecting to {what}{what_index}')
-			what.connect(self.index)
+			what.connect(self)
 
 			self.connected_to = [what.ifname]
 
@@ -664,11 +664,28 @@ class Switch():
 		switches[self.ifname] = self
 
 	def connect(self, what, *args, **kwargs):
-		print(f'[N] {self} is enslaving {what}.')
+		if type(what) in (VirtualNic, Interface, Switch, Router):
+			pass
+		elif what in nics:
+			what = nics[what]
+		elif what in interfaces:
+			what = interfaces[what]
+		elif what in routers:
+			what = routers[what]
+		elif what in switches:
+			what = switches[what]
+		else:
+			print(f'[!] {self} Can not connect {what}, because target does not exist.')
+			return None
 
 		with IPRoute() as ip:
-			if type(what) != int: what = ip.link_lookup(ifname=what)[0]
-			ip.link("set", index=what, master=self.index)
+			if type(what) in (Interface, VirtualNic):
+				print(f'[N] {self} is enslaving {what}.')
+				#what_index = ip.link_lookup(ifname=what.ifname)[0]
+				ip.link("set", index=what.index, master=self.index)
+			else:
+				print(f'[N] {self} is setting trunk to {what}.')
+				what.enslave(self)
 
 	def delete(self, *args, **kwargs):
 		#for port in self.ports:
@@ -700,11 +717,13 @@ class Router():
 		if not 'mac' in kwargs: kwargs['mac'] = generate_mac(*args, **{'device' : 'router', **kwargs})
 		if not 'ip' in kwargs: kwargs['ip'] = None
 		if not 'state' in kwargs: kwargs['state'] = 'up'
+		if not 'routes' in kwargs: kwargs['routes'] = []
 		if not 'trunk' in kwargs:
 			if len(args) and args[0]:
 				kwargs['trunk'] = args[0]
 			else:
 				raise KeyError('Router() needs a trunk interface.')
+		if not 'gateway' in kwargs: kwargs['gateway'] = kwargs['trunk']
 		if not 'connected_to' in kwargs: kwargs['connected_to'] = [kwargs['trunk']]
 
 		if not 'ifname' in kwargs:
@@ -722,10 +741,8 @@ class Router():
 					print(f'[N] Router {kwargs["ifname"]} already exists, wrapping it.')
 					print('TODO: Get the connections (master/slave) of the router.')
 		if not 'input' in kwargs: kwargs['input'] = None
-		for key, val in kwargs.items():
-			self.__dict__[key] = val
 
-		print(f'[N] Router() is using "{self.trunk}" as trunk')
+		print(f'[N] Router() is using "{kwargs["trunk"]}" as trunk')
 
 		with IPRoute() as ip:
 			trunk = ip.link_lookup(ifname=kwargs['trunk'])
@@ -738,7 +755,7 @@ class Router():
 
 			bridge_lookup = ip.link_lookup(ifname=kwargs['ifname'])
 			if not bridge_lookup:
-				ip.link('add', ifname=kwargs['ifname'], kind='bridge', address=self.mac)
+				ip.link('add', ifname=kwargs['ifname'], kind='bridge', address=kwargs['mac'])
 				self.index = ip.link_lookup(ifname=kwargs['ifname'])[0]
 			else:
 				self.index = bridge_lookup[0]
@@ -763,14 +780,18 @@ class Router():
 				ip.flush_addr(self.trunk_index)
 				sys_command(f'dhclient -v {kwargs["ifname"]}')
 
-		routers[self.ifname] = {
-			'ip' : self.ip,
-			'mac' : self.mac, # / ipdb['address']
-			'state' : self.state,
-			'gateway' : self.trunk,
-			'routes' : [],
-			'connected_to' : kwargs['input'].ports['sink_name']
-		}
+		for key, val in kwargs.items():
+			self.__dict__[key] = val
+
+	#	routers[self.ifname] = {
+	#		'ip' : self.ip,
+	#		'mac' : self.mac, # / ipdb['address']
+	#		'state' : self.state,
+	#		'gateway' : self.trunk,
+	#		'routes' : [],
+	#		'connected_to' : kwargs['input'].ports['sink_name']
+	#	}
+		routers[self.ifname] = self
 
 	def delete(self, *args, **kwargs):
 		self.input.delete()
@@ -787,6 +808,10 @@ class Router():
 		target.connect(source_index, target)
 		#ip.link("set", index=what, master=self.index)
 
+	def enslave(self, source, *args, **kwargs):
+		with IPRoute() as ip:
+			ip.link("set", index=self.input.ports['source'], master=source.index)
+
 	def nat(self, *args, **kwargs):
 		pass
 
@@ -802,6 +827,9 @@ class Router():
 			'routes' : self.routes,
 			'connected_to' : self.connected_to
 		}
+
+	def __repr__(self, *args, **kwargs):
+		return f'Router(name={self.ifname}, trunk={self.trunk})'
 
 class NetworkNameSpace():
 	""" Creates a network namespace and keeps track of it's interfaces """
@@ -921,14 +949,14 @@ class VirtualNic():
 	def connect(self, what, target=None, *args, **kwargs):
 		print(f'{self} is connecting {what} [{target}]')
 		if type(what) == str:
-			if what in vmanager.nics:
-				what = vmanager.nics[what]
-			elif what in vmanager.interfaces:
-				what = vmanager.interfaces[what]
-			elif what in vmanager.routers:
-				what = vmanager.routers[what]
-			elif what in vmanager.switches:
-				what = vmanager.switches[what]
+			if what in nics:
+				what = nics[what]
+			elif what in interfaces:
+				what = interfaces[what]
+			elif what in routers:
+				what = routers[what]
+			elif what in switches:
+				what = switches[what]
 			else:
 				print(f'[!] Can not connect {what} to {target}, {what} does not exist.')
 
@@ -945,8 +973,8 @@ class VirtualNic():
 			print(f'[N] {self} is enslaving {what}({what_index}) to {self.ports["source_name"]}')
 			ip.link("set", index=what_index, master=self.ports['source'])
 		else:
-			print(f'[N] {self} is connecting to {what}{what_index}')
-			what.connect(self.ports['source'])
+			print(f'[N] {self} is connecting to {what}[{what_index}]')
+			what.connect(nics[self.ports['source_name']])
 
 			self.connected_to = [what.ifname]
 
