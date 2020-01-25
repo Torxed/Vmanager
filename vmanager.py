@@ -26,17 +26,30 @@ import json #DEB
 #   http://hicu.be/bridge-vs-macvlan
 
 ## Build a cache with our interfaces before we begin setting things up.
-default_routes = {}
-interfaces = {}
-gateways = {}
-routes = {}
+datastore = {
+	'machines' : {},
+	'harddrives' : {},
+	'cds' : {},
 
-machines = {}
-nics = {}
-routers = {}
-switches = {}
-harddrives = {}
-cds = {}
+	'interfaces' : {},
+	'gateways' : {},
+	'default_routes' : {},
+	'routes' : {},
+	'nics' : {},
+	'routers' : {},
+	'switches' : {},
+}
+# default_routes = {}
+# interfaces = {}
+# gateways = {}
+# routes = {}
+# 
+# machines = {}
+# nics = {}
+# routers = {}
+# switches = {}
+# harddrives = {}
+# cds = {}
 
 tmp_mapper = {} # Maps IP -> Interface
 
@@ -60,20 +73,10 @@ def save_memory_db(filename='db.json'):
 		shutil.copy2(filename, f'{filename}.bak{index}')
 
 	with open(filename, 'w') as fh:
-		json.dump({
-			'default_routes' : default_routes.copy(),
-			'interfaces' : interfaces.copy(),
-			'gateways' : gateways.copy(),
-			'routes' : routes.copy(),
-			'machines' : machines.copy(),
-			'nics' : nics.copy(),
-			'routers' : routers.copy(),
-			'switches' : switches.copy(),
-			'harddrives' : harddrives.copy(),
-			'cds' : cds.copy()
-		}, fh, default=json_serial)
+		fh.write(json.dumps(datastore, default=json_serial, indent=4))
 
 def get_memory_db(filename='db.json'):
+	print(f'[N] Restoring database fron {filename}')
 	if not os.path.isfile(filename): return None
 
 	with open(filename,'r') as fh:
@@ -91,42 +94,44 @@ def get_memory_db(filename='db.json'):
 					db = None
 
 	if not db:
+		print('[!] Could not restore database from any of the backups.')
 		return None
 
-	default_routes = db['default_routes']
-	interfaces = db['interfaces']
-	gateways = db['gateways']
-	routes = db['routes']
-	machines = db['machines']
-	nics = db['nics']
-	routers = db['routers']
-	switches = db['switches']
-	harddrives = db['harddrives']
-	cds = db['cds']
+	for key, val in db.items():
+		datastore[key] = val
+
+def convert_memory_into_objects():
+	for hdd in datastore['harddrives']:
+		print(f'[N] Converting {hdd} into a Harddrive().')
+		Harddrive(**datastore['harddrives'][hdd])
+	for cd in datastore['cds']:
+		print(f'[N] Converting {cd} into a CD().')
+		CD(**datastore['cds'][cd])
+	for switch in datastore['switches']:
+		print(f'[N] Converting {switch} into a Switch().')
+		Swtich(**datastore['switches'][switch])
+	for router in datastore['routers']:
+		print(f'[N] Converting {router} into a Router().')
+		Router(**datastore['routers'][router])
+	for machine in datastore['machines']:
+		print(f'[N] Converting {machine} into a Machine().')
+		Machine(**datastore['machines'][machine])
+
+	print(datastore['harddrives'])
 
 class save_db(Thread):
 	def __init__(self):
 		Thread.__init__(self)
 		self.alive = True
 		self.last_checksum = None
+		self.last_save = time.time()
 		self.start()
 
 	def stop_db(self):
 		self.alive = False
 
 	def hash(self):
-		struct = str({
-			'default_routes' : default_routes.copy(),
-			'interfaces' : interfaces.copy(),
-			'gateways' : gateways.copy(),
-			'routes' : routes.copy(),
-			'machines' : machines.copy(),
-			'nics' : nics.copy(),
-			'routers' : routers.copy(),
-			'switches' : switches.copy(),
-			'harddrives' : harddrives.copy(),
-			'cds' : cds.copy()
-		})
+		struct = str(datastore.copy())
 		return hashlib.sha1(bytes(struct, 'UTF-8')).hexdigest()
 
 	def run(self):
@@ -141,11 +146,13 @@ class save_db(Thread):
 			return
 		
 		while self.alive and main and main.is_alive():
-			current_checksum = self.hash()
-			if not self.last_checksum or self.last_checksum != current_checksum:
-				save_memory_db()
-				self.last_checksum = current_checksum
-			time.sleep(1)
+			if time.time() - self.last_save > 1:
+				current_checksum = self.hash()
+				if not self.last_checksum or self.last_checksum != current_checksum:
+					save_memory_db()
+					self.last_checksum = current_checksum
+				self.last_save = time.time()
+			time.sleep(0.025)
 
 def update_interface_cache():
 	print('Updating cache')
@@ -167,7 +174,7 @@ def update_interface_cache():
 				#print(json.dumps(link, indent=4, default=lambda o: str(o)))
 				#print(json.dumps(ipdb.by_name[ifname], indent=4, default=lambda o: str(o)))
 
-				interfaces[ifname] = {
+				datastore['interfaces'][ifname] = {
 					'ip' : list(ipdb.by_name[ifname]['ipaddr']),
 					'mac' : link.get_attr('IFLA_ADDRESS'), # / ipdb['address']
 					'state' : link.get_attr('IFLA_OPERSTATE').lower(), # link['state'] shows an inaccurate state.
@@ -180,36 +187,33 @@ def update_interface_cache():
 					}
 				}
 
-				if interfaces[ifname]['mac'][:5] == 'fe:01':
-					_type = interfaces[ifname]['mac'].split(':')[2]
+				if datastore['interfaces'][ifname]['mac'][:5] == 'fe:01':
+					_type = datastore['interfaces'][ifname]['mac'].split(':')[2]
 					if _type == '00':
-						print(ifname, 'is a switch')
-						switches[ifname] = Switch(ifname=ifname, **interfaces[ifname])
+						datastore['switches'][ifname] = Switch(ifname=ifname, **datastore['interfaces'][ifname])
 					elif _type == '01':
-						print(ifname, 'is a router')
-						routers[ifname] = Router(ifname=ifname, trunk=slaves[ifname][0], **{**interfaces[ifname], 'connected_to' : slaves[ifname][0]})
+						datastore['routers'][ifname] = Router(ifname=ifname, trunk=slaves[ifname][0], **{**datastore['interfaces'][ifname], 'connected_to' : slaves[ifname][0]})
 						# TODO: Enslave the subinterfaces to the router.
 						#for interface in slaves[ifname][1:]:
-						#	routers[ifname].connect(interface)
+						#	datastore['routers'][ifname].connect(interface)
 					#elif _type == '02':
-					#	interfaces[ifname] = Bridge(ifname=ifname, **interfaces[ifname])
+					#	datastore['interfaces'][ifname] = Bridge(ifname=ifname, **datastore['interfaces'][ifname])
 					elif _type == '03':
-						interfaces[ifname] = None # This is a sink to another network interface
+						datastore['interfaces'][ifname] = None # This is a sink to another network interface
 					else:
-						print(ifname, 'is a Vnic')
 						# TODO: FIX!
-						nics[ifname] = VirtualNic(ifname=ifname, **interfaces[ifname])
+						datastore['nics'][ifname] = VirtualNic(ifname=ifname, **datastore['interfaces'][ifname])
 					
-					del(interfaces[ifname])
+					del(datastore['interfaces'][ifname])
 				else:
-					interfaces[ifname] = Interface(ifname=ifname, **interfaces[ifname])
+					datastore['interfaces'][ifname] = Interface(ifname=ifname, **datastore['interfaces'][ifname])
 				
 				for ip_addr in ipdb.by_name[ifname]['ipaddr']:
 					tmp_mapper[ip_addr[0]] = ifname
 
 		for route in ip.get_default_routes():
-			gateways[route.get_attr('RTA_GATEWAY')] = route
-			default_routes[route.get_attr('RTA_GATEWAY')] = {'priority' : route.get_attr('RTA_PRIORITY'), 'raw_data' : route}
+			datastore['gateways'][route.get_attr('RTA_GATEWAY')] = route
+			datastore['default_routes'][route.get_attr('RTA_GATEWAY')] = {'priority' : route.get_attr('RTA_PRIORITY'), 'raw_data' : route}
 
 		for route in ip.get_routes():
 			route_dest = route.get_attr('RTA_DST')
@@ -217,24 +221,24 @@ def update_interface_cache():
 			preferred_source = route.get_attr('RTA_PREFSRC')
 
 			if gateway:
-				gateways[gateway] = route
+				datastore['gateways'][gateway] = route
 			
-			routes[route_dest] = {'source' : preferred_source, 'raw_data' : route, 'gateway' : gateway}
+			datastore['routes'][route_dest] = {'source' : preferred_source, 'raw_data' : route, 'gateway' : gateway}
 			
 			if gateway and not route_dest and not preferred_source:
 				# Default route, try to find the preferred source
-				for interface in interfaces:
-					for ip_info in interfaces[interface].ip:
+				for interface in datastore['interfaces']:
+					for ip_info in datastore['interfaces'][interface].ip:
 						interface_subnet = ipaddress.ip_network(f'{ip_info[0]}/{str(ip_info[1])}', strict=False)
 						if ipaddress.IPv4Address(gateway) in interface_subnet:
-							interfaces[interface]['gateway'] = gateway
+							datastore['interfaces'][interface]['gateway'] = gateway
 							break
 
-			for interface in interfaces:
-				for ip_info in interfaces[interface]['ip']:
+			for interface in datastore['interfaces']:
+				for ip_info in datastore['interfaces'][interface]['ip']:
 					try:
 						if ipaddress.IPv4Address(ip_info[0]) == ipaddress.IPv4Address(preferred_source):
-							interfaces[interface]['routes'].append(route_dest)
+							datastore['interfaces'][interface]['routes'].append(route_dest)
 					except ipaddress.AddressValueError:
 						continue # IPv6 address, TODO: Implement support for IPv6
 
@@ -280,7 +284,6 @@ def generate_mac(*args, **kwargs):
 	random3 = randint(0, 255)
 
 	mac = ':'.join([hex(x)[2:].zfill(2) for x in [prefix, version, kwargs['device'], random1, random2, random3]])
-	print('Generated new mac:', mac)
 	return mac
 
 class simplified_client_socket():
@@ -536,14 +539,14 @@ class Interface():
 	def connect(self, what, target=None, *args, **kwargs):
 		print(f'{self} is connecting {what} [{target}]')
 		if type(what) == str:
-			if what in nics:
-				what = nics[what]
-			elif what in interfaces:
-				what = interfaces[what]
-			elif what in routers:
-				what = routers[what]
-			elif what in switches:
-				what = switches[what]
+			if what in datastore['nics']:
+				what = datastore['nics'][what]
+			elif what in datastore['interfaces']:
+				what = datastore['interfaces'][what]
+			elif what in datastore['routers']:
+				what = datastore['routers'][what]
+			elif what in datastore['switches']:
+				what = datastore['switches'][what]
 			else:
 				print(f'[!] Can not connect {what} to {target}, {what} does not exist.')
 
@@ -655,7 +658,7 @@ class Switch():
 
 			ip.link('set', index=self.index, state='up')
 
-	#	switches[self.ifname] = {
+	#	datastore['switches'][self.ifname] = {
 	#		'ip' : self.ip,
 	#		'mac' : self.mac, # / ipdb['address']
 	#		'state' : self.state,
@@ -663,19 +666,19 @@ class Switch():
 	#		'routes' : [],
 	#		'connected_to' : []
 	#	}
-		switches[self.ifname] = self
+		datastore['switches'][self.ifname] = self
 
 	def connect(self, what, *args, **kwargs):
 		if type(what) in (VirtualNic, Interface, Switch, Router):
 			pass
-		elif what in nics:
-			what = nics[what]
-		elif what in interfaces:
-			what = interfaces[what]
-		elif what in routers:
-			what = routers[what]
-		elif what in switches:
-			what = switches[what]
+		if what in datastore['nics']:
+			what = datastore['nics'][what]
+		elif what in datastore['interfaces']:
+			what = datastore['interfaces'][what]
+		elif what in datastore['routers']:
+			what = datastore['routers'][what]
+		elif what in datastore['switches']:
+			what = datastore['switches'][what]
 		else:
 			print(f'[!] {self} Can not connect {what}, because target does not exist.')
 			return None
@@ -785,7 +788,7 @@ class Router():
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
 
-	#	routers[self.ifname] = {
+	#	datastore['routers'][self.ifname] = {
 	#		'ip' : self.ip,
 	#		'mac' : self.mac, # / ipdb['address']
 	#		'state' : self.state,
@@ -793,7 +796,7 @@ class Router():
 	#		'routes' : [],
 	#		'connected_to' : kwargs['input'].ports['sink_name']
 	#	}
-		routers[self.ifname] = self
+		datastore['routers'][self.ifname] = self
 
 	def delete(self, *args, **kwargs):
 		self.input.delete()
@@ -866,17 +869,18 @@ class VirtualNic():
 			except netlink.exceptions.NetlinkError as e:
 				print(f'[N] {source} and {self.sink} already exists, wrapping them. ({e})')
 				source_index = ip.link_lookup(ifname=source)[0]
-				print(self.sink)
+				#print(self.sink)
 				sink_index = ip.link_lookup(ifname=self.sink)
 				if not sink_index:
-					print('Sink in namespace already?')
+					print('[?] Sink in namespace already?')
 					o = json.loads(sys_command('ip netns exec test ip -j link').decode('UTF-8'))
 					for iface_info in o:
-						print(iface_info['ifname'], self.sink)
+						#print(iface_info['ifname'], self.sink)
 						if iface_info['ifname'] == self.sink:
 							sink_index = iface_info['ifindex'] #link_index? address == mac
+							print(f'[N] Found sink in namespace: {iface_info["ifname"]}')
 							break
-				print(sink_index)
+				#print(sink_index)
 
 		with IPRoute() as ip:
 			self.ports = {
@@ -898,14 +902,14 @@ class VirtualNic():
 		if not 'connected_to' in kwargs: kwargs['connected_to'] = []
 		if not 'ifname' in kwargs: raise KeyError('Interface() needs a ifname.')
 
-		nics[self.ports['source_name']] = Interface(ifname=self.ports['source_name'],
+		datastore['nics'][self.ports['source_name']] = Interface(ifname=self.ports['source_name'],
 													mac=self.mac,
 													ip=self.ip,
 													state=self.state,
 													routes=self.routes,
 													gateway=self.gateway)
 
-		nics[self.ports['sink_name']] = Interface(ifname=self.ports['sink_name'],
+		datastore['nics'][self.ports['sink_name']] = Interface(ifname=self.ports['sink_name'],
 													mac=self.mac,
 													ip=self.ip,
 													state=self.state,
@@ -973,14 +977,14 @@ class VirtualNic():
 	def connect(self, what, target=None, *args, **kwargs):
 		print(f'{self} is connecting {what} [{target}]')
 		if type(what) == str:
-			if what in nics:
-				what = nics[what]
-			elif what in interfaces:
-				what = interfaces[what]
-			elif what in routers:
-				what = routers[what]
-			elif what in switches:
-				what = switches[what]
+			if what in datastore['nics']:
+				what = datastore['nics'][what]
+			elif what in datastore['interfaces']:
+				what = datastore['interfaces'][what]
+			elif what in datastore['routers']:
+				what = datastore['routers'][what]
+			elif what in datastore['switches']:
+				what = datastore['switches'][what]
 			else:
 				print(f'[!] Can not connect {what} to {target}, {what} does not exist.')
 
@@ -998,7 +1002,7 @@ class VirtualNic():
 			ip.link("set", index=what_index, master=self.ports['source'])
 		else:
 			print(f'[N] {self} is connecting to {what}[{what_index}]')
-			what.connect(nics[self.ports['source_name']])
+			what.connect(datastore['nics'][self.ports['source_name']])
 
 			self.connected_to = [what.ifname]
 
@@ -1026,7 +1030,7 @@ class VirtualNic():
 				ip.link('set', index=self.ports['sink'], net_ns_fd=namespace)
 			except:
 				print(f'[N] VNic can\'t change namespace for {self.ports["sink_name"]}. Most likely because it\'s already enslaved to a namespace.')
-			nics[self.ports['sink_name']].namespace = namespace
+			datastore['nics'][self.ports['sink_name']].namespace = namespace
 
 		# TODO: Move this logic into machine setup.
 		#       At the start, VirtualNic was only used for machines, but it is used for so much more these days..
@@ -1084,7 +1088,7 @@ class CD():
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
 
-		cds[self.filename] = self
+		datastore['cds'][self.filename] = self
 
 	def __repr__(self, *args, **kwargs):
 		return f'CD({os.path.basename(self.filename)})'
@@ -1126,10 +1130,18 @@ class Harddrive():
 			if not self.create(**kwargs):
 				raise ValueError(f'Could not create virtual harddrive image: {self.filename}')
 
-		harddrives[kwargs['filename']] = self
+		datastore['harddrives'][kwargs['filename']] = self
 
 	def __repr__(self, *args, **kwargs):
-		return f'HDD({os.path.basename(self.filename)})'
+		return f'HDD(filename={os.path.basename(self.filename)}, size={self.size}, format={self.format})'
+
+	def __dump__(self, *args, **kwargs):
+		return {
+			"filename" : self.filename,
+			"format" : self.format,
+			"snapshots" : self.snapshots,
+			"size" : self.size
+		}
 
 	def create(self, *args, **kwargs):
 		if not 'format' in kwargs: kwargs['format'] = self.format
@@ -1197,10 +1209,11 @@ class Machine(threaded, simplified_client_socket):
 		if not 'efi' in kwargs: kwargs['efi'] = True
 		if not 'monitor_port' in kwargs: kwargs['monitor_port'] = 4000
 
-		machines[kwargs['name']] = self
+		datastore['machines'][kwargs['name']] = self
 
 		if not 'display' in kwargs: kwargs['display'] = None # = '-nographic'
 		self.setName(kwargs['name'])
+
 
 		if type(kwargs['harddrives']) in (int, float):
 			harddrives = []
@@ -1208,7 +1221,15 @@ class Machine(threaded, simplified_client_socket):
 				hdd = Harddrive(filename=f'test{index}.qcow2')
 				harddrives.append(hdd)
 			kwargs['harddrives'] = harddrives
-		if type(kwargs['harddrives']) != list: kwargs['harddrives'] = [kwargs['harddrives']]
+		if type(kwargs['harddrives']) != list:
+			kwargs['harddrives'] = [kwargs['harddrives']]
+		else:
+			hdds_curated = []
+			for hdd in kwargs['harddrives']:
+				if type(hdd) == dict:
+					hdds_curated.append(Harddrive(**hdd))
+			if hdds_curated:
+				kwargs['harddrives'] = hdds_curated
 		if type(kwargs['nics']) in (int, float):
 			# Non specific nics given, just the ammount that we want
 			machine_nics = []
@@ -1219,12 +1240,21 @@ class Machine(threaded, simplified_client_socket):
 			kwargs['nics'] = machine_nics
 		if type(kwargs['nics']) != list: kwargs['nics'] = [kwargs['nics']]
 
-		if kwargs['cd'] and type(kwargs['cd']) != CD and os.path.isfile(kwargs['cd']):
-			kwargs['cd'] = CD(kwargs['cd'])
+		if kwargs['cd']:
+			if type(kwargs['cd']) != CD and type(kwargs['cd']) == dict:
+				kwargs['cd'] = CD(**kwargs['cd'])
+			else:
+				raise ValueError('Machine got a unusual CD argument: {kwargs["cd"]}.\nNeeds to be either a CD() object or a dict that CD() accepts.')
 
+		nics_curated = []
 		for nic in kwargs['nics']:
+			if type(nic) == dict:
+				nic = VirtualNic(**nic)
+				nics_curated.append(nic)
 			if not nic.namespace == kwargs['namespace']:
 				nic.set_namespace(kwargs['namespace'])
+		if len(nics_curated):
+			kwargs['nics'] = nics_curated
 
 		for key, val in kwargs.items():
 			self.__dict__[key] = val
@@ -1233,6 +1263,14 @@ class Machine(threaded, simplified_client_socket):
 
 	def __repr__(self, *args, **kwargs):
 		return f'Machine(name={self.name}, cd={self.cd}, hdd\'s={self.harddrives}, nics={self.nics} monitor=/tmp/{self.name}_socket)'
+
+	def __dump__(self, *args, **kwargs):
+		return {
+			"name" : self.name,
+			"cd" : self.cd,
+			"harddrives" : self.harddrives,
+			"nics" : self.nics
+		}
 
 	def delete(self, *args, **kwargs):
 		self.stop_vm()
@@ -1374,15 +1412,13 @@ def create_virtual_switch(*args, **kwargs):
 def create_virtual_router(*args, **kwargs):
 	pass
 
-
-get_memory_db()
-save_db()
-
 if __name__ == '__main__':
+	get_memory_db()
 	update_interface_cache()
+	save_db()
 
-	del(interfaces['wlp0s20f3']['raw_data']) # Clear stuff we don't need for printing debug output.
-	print('[N] WiFi interface:', json.dumps(interfaces['wlp0s20f3'], indent=4, default=lambda o: str(o)))
+	del(datastore['interfaces']['wlp0s20f3']['raw_data']) # Clear stuff we don't need for printing debug output.
+	print('[N] WiFi interface:', json.dumps(datastore['interfaces']['wlp0s20f3'], indent=4, default=lambda o: str(o)))
 
 	# Set up a route out to the internet, for test purposes.
 	router = Router('ens4u1')
