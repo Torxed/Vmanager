@@ -117,7 +117,9 @@ def convert_memory_into_objects():
 		print(f'[N] Converting {machine} into a Machine().')
 		Machine(**datastore['machines'][machine])
 
-	print(datastore['harddrives'])
+	for iface in datastore['interfaces']:
+		print(f'[N] Converting {iface} to Interface()')
+		Interface(**datastore['interfaces'][iface])
 
 class save_db(Thread):
 	def __init__(self):
@@ -155,7 +157,7 @@ class save_db(Thread):
 			time.sleep(0.025)
 
 def update_interface_cache():
-	print('Updating cache')
+	print('[N] Updating interface cache.')
 	# IPv4Address('192.0.2.6') in IPv4Network('192.0.2.0/28')
 
 	bridged = {}
@@ -175,6 +177,7 @@ def update_interface_cache():
 				#print(json.dumps(ipdb.by_name[ifname], indent=4, default=lambda o: str(o)))
 
 				datastore['interfaces'][ifname] = {
+					'ifname' : ifname,
 					'ip' : list(ipdb.by_name[ifname]['ipaddr']),
 					'mac' : link.get_attr('IFLA_ADDRESS'), # / ipdb['address']
 					'state' : link.get_attr('IFLA_OPERSTATE').lower(), # link['state'] shows an inaccurate state.
@@ -202,11 +205,11 @@ def update_interface_cache():
 						datastore['interfaces'][ifname] = None # This is a sink to another network interface
 					else:
 						# TODO: FIX!
-						datastore['nics'][ifname] = VirtualNic(ifname=ifname, **datastore['interfaces'][ifname])
+						datastore['nics'][ifname] = VirtualNic(**datastore['interfaces'][ifname])
 					
 					del(datastore['interfaces'][ifname])
 				else:
-					datastore['interfaces'][ifname] = Interface(ifname=ifname, **datastore['interfaces'][ifname])
+					datastore['interfaces'][ifname] = Interface(**datastore['interfaces'][ifname])
 				
 				for ip_addr in ipdb.by_name[ifname]['ipaddr']:
 					tmp_mapper[ip_addr[0]] = ifname
@@ -230,9 +233,12 @@ def update_interface_cache():
 				for interface in datastore['interfaces']:
 					for ip_info in datastore['interfaces'][interface].ip:
 						interface_subnet = ipaddress.ip_network(f'{ip_info[0]}/{str(ip_info[1])}', strict=False)
-						if ipaddress.IPv4Address(gateway) in interface_subnet:
-							datastore['interfaces'][interface]['gateway'] = gateway
-							break
+						try:
+							if ipaddress.IPv4Address(gateway) in interface_subnet:
+								datastore['interfaces'][interface]['gateway'] = gateway
+								break
+						except ipaddress.AddressValueError:
+							pass # IPv6
 
 			for interface in datastore['interfaces']:
 				for ip_info in datastore['interfaces'][interface]['ip']:
@@ -491,7 +497,7 @@ class Interface():
 		if not 'gateway' in kwargs: kwargs['gateway'] = None
 		if not 'namespace' in kwargs: kwargs['namespace'] = None
 		if not 'connected_to' in kwargs: kwargs['connected_to'] = []
-		if not 'ifname' in kwargs: raise KeyError('Interface() needs a ifname.')
+		if not 'ifname' in kwargs: raise KeyError(f'Interface() needs at the minimum a ifname, got {kwargs}.')
 		if kwargs['ip'] is None: kwargs['ip'] = []
 
 		if not 'index' in kwargs:
@@ -590,6 +596,7 @@ class Interface():
 
 	def __dump__(self, *args, **kwargs):
 		return {
+			'ifname' : self.ifname,
 			'ip' : self._ip,
 			'mac' : self.mac,
 			'state' : self.state,
@@ -704,6 +711,7 @@ class Switch():
 
 	def __dump__(self, *args, **kwargs):
 		return {
+			'name' : self.name,
 			'ip' : self.ip,
 			'mac' : self.mac,
 			'state' : self.state,
@@ -1243,8 +1251,10 @@ class Machine(threaded, simplified_client_socket):
 		if kwargs['cd']:
 			if type(kwargs['cd']) != CD and type(kwargs['cd']) == dict:
 				kwargs['cd'] = CD(**kwargs['cd'])
+			elif type(kwargs['cd'] == str):
+				kwargs['cd'] = CD(filename=kwargs['cd'])
 			else:
-				raise ValueError('Machine got a unusual CD argument: {kwargs["cd"]}.\nNeeds to be either a CD() object or a dict that CD() accepts.')
+				raise ValueError(f'Machine got a unusual CD argument: {kwargs["cd"]}.\nNeeds to be either a CD() object or a dict that CD() accepts.')
 
 		nics_curated = []
 		for nic in kwargs['nics']:
